@@ -14,19 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Example script for integrating spaseml with the transformers library.
+Example script for integrating spaseml with the transformers library to perform model distillation.
 This script is addopted from hugging face's implementation for Question Answering on the SQUAD Dataset.
 Hugging Face's original implementation is regularly updated and can be found at https://github.com/huggingface/transformers/blob/master/examples/question-answering/run_qa.py
 This script will:
-- Load transformer based modesl
+- Load transformer based models
 - Load a sparseml training and pruning optimizer
 - Train on SQUAD
 - Evaluate on SQUAD
 - Export model to onnx.
 ##########
 Command help:
-usage: run_qa.py [-h] \
-    --model_name_or_path MODEL \
+usage: run_distill_qa.py [-h] \
+    [--teacher_model_name_or_path] \
+    [--student_model_name_or_path] \
+    [--temperature] \
+    [--distill_hardness] \
     [--dataset_name]  \
     [--num_train_epochs] \
     [--do_train] \
@@ -41,15 +44,23 @@ usage: run_qa.py [-h] \
     [--cache_dir]\
     [--preprocessing_num_workers] \
     [--seed] 42 \
-    [--nm_prune_config]
-    [--do_onnx_export]
-    [--onnx_export_path]
+    [--nm_prune_config] \
+    [--do_onnx_export] \
+    [--onnx_export_path] \
+    [--layers_to_keep] \
 
 Train, prune, and evaluate a transformer base question answering model on squad.
     -h, --help            show this help message and exit
-    --model_name_or_path MODEL      The path to the transformers model you wish to train
+    --teacher_model_name_or_path    The name or path of model which will be used for distilation.
+                                    Note, this model needs to be trained for QA task already.
+    --student_model_name_or_path    The path to the transformers model you wish to train
                                     or the name of the pretrained language model you wish
                                     to use. ex: bert-base-uncased.
+    --temperature                   Hyperparameter which controls model distilation
+    --distill_hardness              Hyperparameter which controls how much of the loss comes from teacher vs training labels
+    --model_name_or_path            The path to the transformers model you wish to train
+    --temperature                   Hyperparameter which controls model distilation 
+    --distill_hardness              Hyperparameter which controls how much of the loss comes from teacher vs training labels
     --dataset_name                  The name of which dataset you want to use to train or
                                     your model. ex: squad for using SQuAD.
     --num_train_epochs              Paramater to control how many training epochs you wish
@@ -75,11 +86,13 @@ Train, prune, and evaluate a transformer base question answering model on squad.
                                     be found in prune_config_files but are customized for bert-base-uncased.
     --do_onnx_export                Boolean denoting if the model should be exported to onnx
     --onnx_export_path              Path where onnx model path will be exported. ex: onnx-export
+    --layers_to_keep                Number of layers to keep from original model. Layers are dropped before training
 
 ##########
-Example command for training a 95% sparse BERT SQUAD model for 1 epoch:
-python run_qa.py \
-    --model_name_or_path bert-base-uncased \
+Example command for training a 95% sparse BERT SQUAD model for 1 epoch with a unpruned teacher:
+python run_distill_qa.py \
+    --teacher_model_name_or_path models/neuralmagic-bert-squad-12layer-0sparse
+    --student_model_name_or_path bert-base-uncased \
     --dataset_name squad \
     --num_train_epochs 1 \
     --do_train \
@@ -96,12 +109,15 @@ python run_qa.py \
     --seed 42 \
     --nm_prune_config prune_config_files/95sparsity1epoch.yaml \
     --do_onnx_export \
-    --onnx_export_path 95sparsity1epoch/
+    --onnx_export_path 95sparsity1epoch/ \
+    --distill_hardness 0.5 \
+    --temperature 2.0 \
 """
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
 import logging
 import os
+import numpy as np
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
@@ -126,7 +142,7 @@ from transformers.utils import check_min_version
 from utils_qa import postprocess_qa_predictions
 
 # Start SparseML integration
-from sparseml_utils import SparseMLQATrainer, convert_example_to_features
+from sparseml_utils import SparseMLDistillQATrainer, convert_example_to_features
 from sparseml.pytorch.utils import ModuleExporter
 # End SparseML integration
 
@@ -142,9 +158,17 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
-
-    model_name_or_path: str = field(
-        metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    teacher_model_name_or_path: Optional[str] = field(
+        default="spacemanidol/neuralmagic-bert-squad-12layer-0sparse", metadata={"help": "Teacher model which needs to be a trained QA model"}
+    )
+    student_model_name_or_path: Optional[str] = field(
+        default="bert-base-uncased", metadata={"help": "Student model"}
+    )
+    temperature: Optional[float] = field(
+        default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
+    )
+    distill_hardness: Optional[float] = field(
+        default=1.0, metadata={"help": "Proportion of loss coming from teacher model."}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -380,26 +404,41 @@ def main():
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
     config = AutoConfig.from_pretrained(
-        model_args.config_name if model_args.config_name else model_args.model_name_or_path,
+        model_args.config_name if model_args.config_name else model_args.student_model_name_or_path,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+        model_args.tokenizer_name if model_args.tokenizer_name else model_args.student_model_name_or_path,
         cache_dir=model_args.cache_dir,
         use_fast=True,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForQuestionAnswering.from_pretrained(
-        model_args.model_name_or_path,
-        from_tf=bool(".ckpt" in model_args.model_name_or_path),
+    student_model = AutoModelForQuestionAnswering.from_pretrained(
+        model_args.student_model_name_or_path,
+        from_tf=bool(".ckpt" in model_args.student_model_name_or_path),
         config=config,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+    teacher_model = None
+    if model_args.teacher_model_name_or_path != None:
+        teacher_model = AutoModelForQuestionAnswering.from_pretrained(
+            model_args.teacher_model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.teacher_model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+        )
+        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
+        params = sum([np.prod(p.size()) for p in teacher_model_parameters])
+        logger.info("Teacher Model has %s parameters", params)   
+
+    student_model_parameters = filter(lambda p: p.requires_grad, student_model.parameters())
+    params = sum([np.prod(p.size()) for p in student_model_parameters])
+    logger.info("Student Model has %s parameters", params)
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -647,9 +686,12 @@ def main():
     # Start SparseML Integration
     ####################################################################################
     # Initialize our Trainer
-    trainer = SparseMLQATrainer(
+    trainer = SparseMLDistillQATrainer(
         data_args.nm_prune_config,
-        model=model,
+        teacher=teacher_model,
+        distill_hardness = model_args.distill_hardness,
+        temperature = model_args.temperature,
+        model=student_model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
@@ -727,7 +769,7 @@ def main():
         logger.info("*** Export to ONNX ***")
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
         exporter = ModuleExporter(
-            model, output_dir=data_args.onnx_export_path
+            student_model, output_dir=data_args.onnx_export_path
         )
         sample_batch = convert_example_to_features(
             datasets["validation"][0],
