@@ -16,6 +16,7 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
     :param nm_prune_config: recipe for model sparsification
     :param args, kwargs: arguments passed into parent class
     """
+
     def __init__(self, nm_prune_config, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.nm_prune_config = nm_prune_config
@@ -25,10 +26,20 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         Create optimizer customized using SparseML
         """
         super().create_optimizer()
-        steps_per_epoch = math.ceil(len(self.train_dataset) / (self.args.per_device_train_batch_size * self.args._n_gpu))
+        steps_per_epoch = math.ceil(
+            len(self.train_dataset) / (self.args.per_device_train_batch_size * self.args._n_gpu)
+        )
         manager = ScheduledModifierManager.from_yaml(self.nm_prune_config)
         self.args.num_train_epochs = float(manager.max_epochs)
-        self.optimizer = ScheduledOptimizer(self.optimizer, self.model, manager, steps_per_epoch=steps_per_epoch, loggers=None)
+        if hasattr(self, "scaler"):
+            manager.initialize(self.model, epoch=0.0)
+            self.scaler = manager.modify(
+                self.model, self.optimizer, steps_per_epoch=steps_per_epoch, wrap_optim=self.scaler
+            )
+        else:
+            self.optimizer = ScheduledOptimizer(
+                self.optimizer, self.model, manager, steps_per_epoch=steps_per_epoch, loggers=None
+            )
 
 
 class SparseMLDistillQATrainer(SparseMLQATrainer):
@@ -41,6 +52,7 @@ class SparseMLDistillQATrainer(SparseMLQATrainer):
     :param temperature: temperature used for loss
     :param args, kwargs: arguments passed into parent class
     """
+
     def __init__(self, nm_prune_config, teacher=None, distill_hardness=0.5, temperature=2.0, *args, **kwargs):
         super().__init__(nm_prune_config, *args, **kwargs)
         self.teacher = teacher
@@ -53,7 +65,7 @@ class SparseMLDistillQATrainer(SparseMLQATrainer):
         Computing loss using teacher/student distillation
         """
         outputs = model(**inputs)
-        loss = outputs['loss']
+        loss = outputs["loss"]
         if self.teacher is not None:
             input_device = inputs["input_ids"].device
             self.teacher = self.teacher.to(input_device)
@@ -63,10 +75,10 @@ class SparseMLDistillQATrainer(SparseMLQATrainer):
             end_logits_label = inputs["start_positions"]
             with torch.no_grad():
                 teacher_output = self.teacher(
-                                input_ids=inputs["input_ids"],
-                                token_type_ids=inputs["token_type_ids"],
-                                attention_mask=inputs["attention_mask"],
-                            )
+                    input_ids=inputs["input_ids"],
+                    token_type_ids=inputs["token_type_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
             start_logits_teacher = teacher_output["start_logits"]
             end_logits_teacher = teacher_output["end_logits"]
             loss_start = (
@@ -89,8 +101,8 @@ class SparseMLDistillQATrainer(SparseMLQATrainer):
             loss_start = self.criterion(start_logits_student, start_logits_label)
             loss_end = self.criterion(end_logits_student, end_logits_label)
             label_loss = (loss_start + loss_end) / 2.0
-            loss = ((1-self.distill_hardness) * label_loss) + (self.distill_hardness * teacher_loss)
-        return (loss, outputs) if return_outputs else loss 
+            loss = ((1 - self.distill_hardness) * label_loss) + (self.distill_hardness * teacher_loss)
+        return (loss, outputs) if return_outputs else loss
 
 
 def convert_example_to_features(example, tokenizer, max_seq_length, doc_stride, max_query_length=30):
@@ -146,9 +158,7 @@ def convert_example_to_features(example, tokenizer, max_seq_length, doc_stride, 
         for i in range(doc_span.length):
             split_token_index = doc_span.start + i
             token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
-            is_max_context = _check_is_max_context(
-                doc_spans, doc_span_index, split_token_index
-            )
+            is_max_context = _check_is_max_context(doc_spans, doc_span_index, split_token_index)
             token_is_max_context[len(tokens)] = is_max_context
             tokens.append(all_doc_tokens[split_token_index])
             segment_ids.append(1)
