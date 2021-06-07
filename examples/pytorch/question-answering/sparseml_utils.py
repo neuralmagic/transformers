@@ -8,6 +8,8 @@ from trainer_qa import QuestionAnsweringTrainer
 from sparseml.pytorch.optim.manager import ScheduledModifierManager
 from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
 
+from sparseml.pytorch.utils import logger
+
 
 class SparseMLQATrainer(QuestionAnsweringTrainer):
     """
@@ -20,6 +22,11 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
     def __init__(self, nm_prune_config, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.nm_prune_config = nm_prune_config
+        self.manager = None
+        loggers = []
+        if "wandb" in self.args.report_to:
+            loggers.append(logger.WANDBLogger())
+        self.loggers = loggers
 
     def create_optimizer(self):
         """
@@ -29,16 +36,16 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         steps_per_epoch = math.ceil(
             len(self.train_dataset) / (self.args.per_device_train_batch_size * self.args._n_gpu)
         )
-        manager = ScheduledModifierManager.from_yaml(self.nm_prune_config)
-        self.args.num_train_epochs = float(manager.max_epochs)
+        self.manager = ScheduledModifierManager.from_yaml(self.nm_prune_config)
+        self.args.num_train_epochs = float(self.manager.max_epochs)
         if hasattr(self, "scaler"):
-            manager.initialize(self.model, epoch=0.0)
-            self.scaler = manager.modify(
+            self.manager.initialize(self.model, epoch=0.0, loggers=self.loggers)
+            self.scaler = self.manager.modify(
                 self.model, self.optimizer, steps_per_epoch=steps_per_epoch, wrap_optim=self.scaler
             )
         else:
             self.optimizer = ScheduledOptimizer(
-                self.optimizer, self.model, manager, steps_per_epoch=steps_per_epoch, loggers=None
+                self.optimizer, self.model, self.manager, steps_per_epoch=steps_per_epoch, loggers=self.loggers
             )
 
 
