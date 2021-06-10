@@ -14,89 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Example script for integrating spaseml with the transformers library.
-This script is addopted from hugging face's implementation for Question Answering on the SQUAD Dataset.
-Hugging Face's original implementation is regularly updated and can be found at https://github.com/huggingface/transformers/blob/master/examples/question-answering/run_qa.py
-This script will:
-- Load transformer based modesl
-- Load a sparseml training and pruning optimizer
-- Train on SQUAD
-- Evaluate on SQUAD
-- Export model to onnx.
-##########
-Command help:
-usage: run_qa.py [-h] \
-    --model_name_or_path MODEL \
-    [--dataset_name]  \
-    [--num_train_epochs] \
-    [--do_train] \
-    [--do_eval] \
-    [--per_device_train_batch_size] \
-    [--per_device_eval_batch_size] \
-    [--learning_rate]\
-    [--max_seq_length]\
-    [--doc_stride]\
-    [--output_dir] \
-    [--overwrite_output_dir] \
-    [--cache_dir]\
-    [--preprocessing_num_workers] \
-    [--seed] 42 \
-    [--nm_prune_config]
-    [--do_onnx_export]
-    [--onnx_export_path]
-
-Train, prune, and evaluate a transformer base question answering model on squad.
-    -h, --help            show this help message and exit
-    --model_name_or_path MODEL      The path to the transformers model you wish to train
-                                    or the name of the pretrained language model you wish
-                                    to use. ex: bert-base-uncased.
-    --dataset_name                  The name of which dataset you want to use to train or
-                                    your model. ex: squad for using SQuAD.
-    --num_train_epochs              Paramater to control how many training epochs you wish
-                                    your model to train.
-    --do_train                      Boolean denoting if the model should be trained
-                                    or not. Default is false.
-    --do_eval                       Boolean denoting if the model should be evaluated
-                                    or not. Default is false.
-    --per_device_train_batch_size   Size of each training batch based on samples per GPU.
-                                    12 will fit in a 11gb GPU, 16 in a 16gb.
-    --per_device_eval_batch_size    Size of each training batch based on samples per GPU.
-                                    12 will fit in a 11gb GPU, 16 in a 16gb.
-    --learning_rate                 Learning rate initial float value. ex: 3e-5.
-    --max_seq_length                Int for the max sequence length to be parsed as a context
-                                    window. ex: 384 tokens.
-    --output_dir                    Path which model checkpoints and paths should be saved.
-    --overwrite_output_dir          Boolean to define if the
-    --cache_dir                     Directiory which cached transformer files(datasets, models
-                                    , tokenizers) are saved for fast loading.
-    --preprocessing_num_workers     The amount of cpu workers which are used to process datasets
-    --seed                          Int which determines what random seed is for training/shuffling
-    --nm_prune_config               Path to the neural magic prune configuration file. examples can
-                                    be found in prune_config_files but are customized for bert-base-uncased.
-    --do_onnx_export                Boolean denoting if the model should be exported to onnx
-    --onnx_export_path              Path where onnx model path will be exported. ex: onnx-export
-
-##########
-Example command for training a 95% sparse BERT SQUAD model for 1 epoch:
-python run_qa.py \
-    --model_name_or_path bert-base-uncased \
-    --dataset_name squad \
-    --num_train_epochs 1 \
-    --do_train \
-    --do_eval \
-    --per_device_train_batch_size 12 \
-    --per_device_eval_batch_size 12 \
-    --learning_rate 3e-5 \
-    --max_seq_length 384 \
-    --doc_stride 128 \
-    --output_dir 95sparsity1epoch/ \
-    --overwrite_output_dir \
-    --cache_dir cache \
-    --preprocessing_num_workers 8 \
-    --seed 42 \
-    --nm_prune_config prune_config_files/95sparsity1epoch.yaml \
-    --do_onnx_export \
-    --onnx_export_path 95sparsity1epoch/
+Fine-tuning the library models for question answering.
 """
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
@@ -106,9 +24,11 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+import numpy
 from datasets import load_dataset, load_metric
 
 import transformers
+from sparseml_utils import SparseMLQATrainer, export_model
 from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
@@ -125,11 +45,6 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from utils_qa import postprocess_qa_predictions
 
-# Start SparseML integration
-from sparseml_utils import SparseMLQATrainer, convert_example_to_features
-from sparseml.pytorch.utils import ModuleExporter
-# End SparseML integration
-
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.7.0.dev0")
@@ -142,9 +57,17 @@ class ModelArguments:
     """
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
-
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    teacher_model_name_or_path: Optional[str] = field(
+        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+    )
+    temperature: Optional[float] = field(
+        default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
+    )
+    distill_hardness: Optional[float] = field(
+        default=1.0, metadata={"help": "Proportion of loss coming from teacher model."}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -175,21 +98,13 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    ####################################################################################
-    # Start SparseML Integration
-    ####################################################################################
-    nm_prune_config: Optional[str] = field(
-        default="recipes/noprune1epoch.yaml",
+    recipe: Optional[str] = field(
+        default=None,
         metadata={"help": "The input file name for the Neural Magic pruning config"},
     )
-    do_onnx_export: bool = field(default=True, metadata={"help": "Export model to onnx"})
     onnx_export_path: Optional[str] = field(
-        default="onnx-export", metadata={"help": "The filename and path which will be where onnx model is outputed"}
+        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
     )
-    ####################################################################################
-    # End SparseML Integration
-    ####################################################################################
-
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -400,6 +315,18 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+
+    teacher_model = None
+    if model_args.teacher_model_name_or_path is not None:
+        teacher_model = AutoModelForQuestionAnswering.from_pretrained(
+            model_args.teacher_model_name_or_path,
+            from_tf=bool(".ckpt" in model_args.teacher_model_name_or_path),
+            config=config,
+            cache_dir=model_args.cache_dir,
+        )
+        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
+        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        logger.info("Teacher Model has %s parameters", params)
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -643,12 +570,12 @@ def main():
     def compute_metrics(p: EvalPrediction):
         return metric.compute(predictions=p.predictions, references=p.label_ids)
 
-    ####################################################################################
-    # Start SparseML Integration
-    ####################################################################################
     # Initialize our Trainer
     trainer = SparseMLQATrainer(
-        data_args.nm_prune_config,
+        data_args.recipe,
+        teacher=teacher_model,
+        distill_hardness=model_args.distill_hardness,
+        temperature=model_args.temperature,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
@@ -659,9 +586,6 @@ def main():
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
     )
-    ####################################################################################
-    # End SparseML Integration
-    ####################################################################################
 
     # Training
     if training_args.do_train:
@@ -720,25 +644,11 @@ def main():
 
         trainer.push_to_hub(**kwargs)
 
-    ####################################################################################
-    # Start SparseML Integration
-    ####################################################################################
-    if data_args.do_onnx_export:
+    if data_args.onnx_export_path:
         logger.info("*** Export to ONNX ***")
-        os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        exporter = ModuleExporter(
-            model, output_dir=data_args.onnx_export_path
-        )
-        sample_batch = convert_example_to_features(
-            datasets["validation"][0],
-            tokenizer,
-            data_args.max_seq_length,
-            data_args.doc_stride
-        )
-        exporter.export_onnx(sample_batch=sample_batch, convert_qat=True)
-    ####################################################################################
-    # End SparseML Integration
-    ####################################################################################
+        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        export_model(model, eval_dataloader, data_args.onnx_export_path)
+
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)
