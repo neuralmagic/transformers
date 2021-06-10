@@ -60,10 +60,10 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-    teacher_model_name_or_path: Optional[str] = field(
+    distill_teacher: Optional[str] = field(
         default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
     )
-    temperature: Optional[float] = field(
+    distill_temperature: Optional[float] = field(
         default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
     )
     distill_hardness: Optional[float] = field(
@@ -100,7 +100,8 @@ class DataTrainingArguments:
 
     recipe: Optional[str] = field(
         default=None,
-        metadata={"help": "The input file name for the Neural Magic pruning config"},
+        metadata={"help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
+                  "for more information"},
     )
     onnx_export_path: Optional[str] = field(
         default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
@@ -317,10 +318,10 @@ def main():
     )
 
     teacher_model = None
-    if model_args.teacher_model_name_or_path is not None:
+    if model_args.distill_teacher is not None:
         teacher_model = AutoModelForQuestionAnswering.from_pretrained(
-            model_args.teacher_model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.teacher_model_name_or_path),
+            model_args.distill_teacher,
+            from_tf=bool(".ckpt" in model_args.distill_teacher),
             config=config,
             cache_dir=model_args.cache_dir,
         )
@@ -575,7 +576,7 @@ def main():
         data_args.recipe,
         teacher=teacher_model,
         distill_hardness=model_args.distill_hardness,
-        temperature=model_args.temperature,
+        distill_temperature=model_args.distill_temperature,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,

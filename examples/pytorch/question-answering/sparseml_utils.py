@@ -16,16 +16,16 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
     :param recipe: recipe for model sparsification
     :param teacher: teacher model for distillation
     :param distill_hardness: ratio of loss by teacher targets (between 0 and 1)
-    :param temperature: temperature for distillation
+    :param distill_temperature: temperature for distillation
     :param args, kwargs: arguments passed into parent class
     """
 
-    def __init__(self, recipe, teacher=None, distill_hardness=0.5, temperature=2.0, *args, **kwargs):
+    def __init__(self, recipe, teacher=None, distill_hardness=0.5, distill_temperature=2.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.recipe = recipe
         self.teacher = teacher
         self.distill_hardness = distill_hardness
-        self.temperature = temperature
+        self.distill_temperature = distill_temperature
         self.criterion = torch.nn.CrossEntropyLoss()
 
         self.manager = None
@@ -85,19 +85,19 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
             end_logits_teacher = teacher_output["end_logits"]
             loss_start = (
                 F.kl_div(
-                    input=F.log_softmax(start_logits_student / self.temperature, dim=-1),
-                    target=F.softmax(start_logits_teacher / self.temperature, dim=-1),
+                    input=F.log_softmax(start_logits_student / self.distill_temperature, dim=-1),
+                    target=F.softmax(start_logits_teacher / self.distill_temperature, dim=-1),
                     reduction="batchmean",
                 )
-                * (self.temperature ** 2)
+                * (self.distill_temperature ** 2)
             )
             loss_end = (
                 F.kl_div(
-                    input=F.log_softmax(end_logits_student / self.temperature, dim=-1),
-                    target=F.softmax(end_logits_teacher / self.temperature, dim=-1),
+                    input=F.log_softmax(end_logits_student / self.distill_temperature, dim=-1),
+                    target=F.softmax(end_logits_teacher / self.distill_temperature, dim=-1),
                     reduction="batchmean",
                 )
-                * (self.temperature ** 2)
+                * (self.distill_temperature ** 2)
             )
             teacher_loss = (loss_start + loss_end) / 2.0
             loss_start = self.criterion(start_logits_student, start_logits_label)
