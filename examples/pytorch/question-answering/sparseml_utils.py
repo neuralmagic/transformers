@@ -2,7 +2,8 @@ import inspect
 import collections
 import math
 import os
-from typing import Any
+from typing import Any, Optional
+import json
 
 import numpy
 import torch
@@ -13,6 +14,8 @@ from sparseml.pytorch.optim.manager import ScheduledModifierManager
 from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
 from sparseml.pytorch.utils import ModuleExporter, logger
 from trainer_qa import QuestionAnsweringTrainer
+
+from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
 from transformers.models.bert.modeling_bert import BertForQuestionAnswering
 
@@ -28,36 +31,63 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
     :param args, kwargs: arguments passed into parent class
     """
 
-    def __init__(self, recipe, teacher=None, distill_hardness=0.5, distill_temperature=2.0, *args, **kwargs):
+    def __init__(
+        self, model_name_or_path, recipes, teacher=None, distill_hardness=0.5, distill_temperature=2.0, *args, **kwargs
+    ):
         super().__init__(*args, **kwargs)
-        self.recipe = recipe
+        self.model_name_or_path = str(model_name_or_path)
+        self.recipes = [recipe for recipe in recipes if recipe]
         self.teacher = teacher
         self.distill_hardness = distill_hardness
         self.distill_temperature = distill_temperature
         self.criterion = torch.nn.CrossEntropyLoss()
 
-        self.manager = None
+        manager = None
+        modifiers = []
+        for recipe in self.recipes:
+            manager = ScheduledModifierManager.from_yaml(recipe, modifiers)
+            modifiers = manager.modifiers
+        self.manager = manager
+
         self.loggers = None
-        if self.recipe is not None:
+        if self.recipes is not None:
             loggers = []
             if "wandb" in self.args.report_to:
                 loggers.append(logger.WANDBLogger())
             self.loggers = loggers
+
+    def apply_recipes(self, epoch=0.0):
+        """
+        Apply recipes and sparsification related parameters to the model
+        """
+        if self.manager is not None:
+            self.manager.initialize(self.model, epoch=epoch, loggers=self.loggers)
+            if os.path.isdir(self.model_name_or_path):
+                if os.path.isfile(os.path.join(self.model_name_or_path, WEIGHTS_NAME)):
+                    archive_file = os.path.join(self.model_name_or_path, WEIGHTS_NAME)
+                    state_dict = torch.load(archive_file, map_location="cpu")
+                    _, missing_keys, unexpected_keys, _ = BertForQuestionAnswering._load_state_dict_into_model(
+                        self.model, state_dict, self.model_name_or_path, _fast_init=False
+                    )
+                    if missing_keys or unexpected_keys:
+                        raise RuntimeError(
+                            "Unexpected or missing keys detected when applying recipes to models\n"
+                            f"Missing keys: {missing_keys}\n"
+                            f"Unexpected keys: {unexpected_keys}\n"
+                        )
 
     def create_optimizer(self):
         """
         Create optimizer customized using SparseML
         """
         super().create_optimizer()
-        if self.recipe is None:
+        if not self.recipes:
             return
         steps_per_epoch = math.ceil(
             len(self.train_dataset) / (self.args.per_device_train_batch_size * self.args._n_gpu)
         )
-        self.manager = ScheduledModifierManager.from_yaml(self.recipe)
         self.args.num_train_epochs = float(self.manager.max_epochs)
         if hasattr(self, "scaler"):
-            self.manager.initialize(self.model, epoch=0.0, loggers=self.loggers)
             self.scaler = self.manager.modify(
                 self.model, self.optimizer, steps_per_epoch=steps_per_epoch, wrap_optim=self.scaler
             )
@@ -70,7 +100,7 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         """
         Computing loss using teacher/student distillation
         """
-        if self.recipe is None or self.teacher is None:
+        if not self.recipes or self.teacher is None:
             return super().compute_loss(model, inputs, return_outputs=return_outputs)
 
         outputs = model(**inputs)
@@ -113,6 +143,22 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
             label_loss = (loss_start + loss_end) / 2.0
             loss = ((1 - self.distill_hardness) * label_loss) + (self.distill_hardness * teacher_loss)
         return (loss, outputs) if return_outputs else loss
+
+    def save_model(self, output_dir: Optional[str] = None):
+        """
+        Save model during or after training. The sparsification recipe will also be saved.
+        """
+        super().save_model(output_dir=output_dir)
+        self._save_recipe(output_dir=output_dir)
+
+    def _save_recipe(self, output_dir: Optional[str] = None):
+        if output_dir is None:
+            output_dir = self.args.output_dir
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        output_recipe_file = os.path.join(output_dir, RECIPE_NAME)
+        with open(output_recipe_file, "w") as fp:
+            json.dump({"recipe": str(self.manager) if self.manager is not None else None}, fp)
 
 
 class QuestionAnsweringModuleExporter(ModuleExporter):
@@ -173,3 +219,43 @@ def export_model(model, dataloader, output_dir, num_exported_samples):
             num_samples += 1
             if num_samples >= num_exported_samples:
                 return
+
+
+def preprocess_state_dict(pretrained_model_name_or_path):
+    """
+    Restore original parameter names that were changed by QAT process
+    """
+    state_dict = None
+    if pretrained_model_name_or_path is not None:
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+                archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+                state_dict = torch.load(archive_file, map_location="cpu")
+                removed_keys = [
+                    key
+                    for key in state_dict
+                    if key.startswith("bert.encoder.layer.")
+                    and (key.endswith(".module.weight") or key.endswith(".module.bias"))
+                ]
+                for key in removed_keys:
+                    new_key = key.replace(".module", "")
+                    state_dict[new_key] = state_dict[key]
+                    state_dict.pop(key)
+    return state_dict
+
+
+def load_recipe(pretrained_model_name_or_path):
+    """
+    Load recipe from the model directory
+    """
+    recipe = None
+    if pretrained_model_name_or_path is not None:
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
+                with open(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)) as fp:
+                    recipe = json.load(fp)
+                    recipe = recipe["recipe"]
+    return recipe
+
