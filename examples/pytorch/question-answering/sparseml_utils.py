@@ -1,3 +1,5 @@
+import inspect
+import collections
 import math
 import os
 from typing import Any
@@ -12,6 +14,7 @@ from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
 from sparseml.pytorch.utils import ModuleExporter, logger
 from trainer_qa import QuestionAnsweringTrainer
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
+from transformers.models.bert.modeling_bert import BertForQuestionAnswering
 
 
 class SparseMLQATrainer(QuestionAnsweringTrainer):
@@ -116,7 +119,7 @@ class QuestionAnsweringModuleExporter(ModuleExporter):
     """
     Module exporter class for Question Answering
     """
-
+    @classmethod
     def get_output_names(self, out: Any):
         if not isinstance(out, QuestionAnsweringModelOutput):
             raise ValueError("Expected QuestionAnsweringModelOutput, got {type(out)}")
@@ -143,9 +146,12 @@ def export_model(model, dataloader, output_dir, num_exported_samples):
     os.makedirs(sample_inputs, exist_ok=True)
     os.makedirs(sample_outputs, exist_ok=True)
 
+    forward_args_spec = inspect.getfullargspec(BertForQuestionAnswering.forward)
     for _, sample_batch in enumerate(dataloader):
         if sess is None:
-            one_sample_input = {f: sample_batch[f][0].reshape(1, -1) for f in sample_batch}
+            one_sample_input = collections.OrderedDict(
+                [(f, sample_batch[f][0].reshape(1, -1)) for f in forward_args_spec.args if f in sample_batch]
+            )
 
             try:
                 exporter.export_onnx(sample_batch=one_sample_input, convert_qat=True)
