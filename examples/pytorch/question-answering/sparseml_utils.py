@@ -1,9 +1,8 @@
-import inspect
 import collections
+import inspect
 import math
 import os
 from typing import Any, Optional
-import json
 
 import numpy
 import torch
@@ -14,7 +13,6 @@ from sparseml.pytorch.optim.manager import ScheduledModifierManager
 from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
 from sparseml.pytorch.utils import ModuleExporter, logger
 from trainer_qa import QuestionAnsweringTrainer
-
 from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
 from transformers.models.bert.modeling_bert import BertForQuestionAnswering
@@ -61,20 +59,31 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         Apply recipes and sparsification related parameters to the model
         """
         if self.manager is not None:
+            org_state_dict = self.model.state_dict()
             self.manager.initialize(self.model, epoch=epoch, loggers=self.loggers)
+            new_state_dict = self.model.state_dict()
+            new_params = [p for p in new_state_dict.keys() if p not in org_state_dict]
+
             if os.path.isdir(self.model_name_or_path):
                 if os.path.isfile(os.path.join(self.model_name_or_path, WEIGHTS_NAME)):
                     archive_file = os.path.join(self.model_name_or_path, WEIGHTS_NAME)
                     state_dict = torch.load(archive_file, map_location="cpu")
-                    _, missing_keys, unexpected_keys, _ = BertForQuestionAnswering._load_state_dict_into_model(
-                        self.model, state_dict, self.model_name_or_path, _fast_init=False
-                    )
-                    if missing_keys or unexpected_keys:
-                        raise RuntimeError(
-                            "Unexpected or missing keys detected when applying recipes to models\n"
-                            f"Missing keys: {missing_keys}\n"
-                            f"Unexpected keys: {unexpected_keys}\n"
+                    new_params_to_init = [p for p in new_params if p in state_dict.keys()]
+                    if new_params_to_init:
+                        # If we're here, the assumption is that all the new parameters introduced
+                        # by the recipes are available to be restore from the checkpoint---this is
+                        # case of evaluating pruned or pruned quantized models
+                        # Otherwise, we're in use cases such as quantizing a block pruned model in which
+                        # new parameters need to be initialized and trained during the QAT process
+                        _, missing_keys, unexpected_keys, _ = BertForQuestionAnswering._load_state_dict_into_model(
+                            self.model, state_dict, self.model_name_or_path, _fast_init=False
                         )
+                        if missing_keys or unexpected_keys:
+                            raise RuntimeError(
+                                "Unexpected or missing keys detected when applying recipes to models\n"
+                                f"Missing keys: {missing_keys}\n"
+                                f"Unexpected keys: {unexpected_keys}\n"
+                            )
 
     def create_optimizer(self):
         """
@@ -149,22 +158,20 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         Save model during or after training. The sparsification recipe will also be saved.
         """
         super().save_model(output_dir=output_dir)
-        self._save_recipe(output_dir=output_dir)
+        if self.manager is not None:
+            self._save_recipe(output_dir=output_dir)
 
     def _save_recipe(self, output_dir: Optional[str] = None):
-        if output_dir is None:
-            output_dir = self.args.output_dir
         output_dir = output_dir if output_dir is not None else self.args.output_dir
-        os.makedirs(output_dir, exist_ok=True)
         output_recipe_file = os.path.join(output_dir, RECIPE_NAME)
-        with open(output_recipe_file, "w") as fp:
-            json.dump({"recipe": str(self.manager) if self.manager is not None else None}, fp)
+        self.manager.save(output_recipe_file)
 
 
 class QuestionAnsweringModuleExporter(ModuleExporter):
     """
     Module exporter class for Question Answering
     """
+
     @classmethod
     def get_output_names(self, out: Any):
         if not isinstance(out, QuestionAnsweringModelOutput):
@@ -229,15 +236,19 @@ def preprocess_state_dict(pretrained_model_name_or_path):
     if pretrained_model_name_or_path is not None:
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
         if os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
+                recipe = os.path.join(pretrained_model_name_or_path, RECIPE_NAME)
+                manager = ScheduledModifierManager.from_yaml(recipe)
+                modifiers = [m.__class__.__name__ for m in manager.modifiers]
+                is_qat_recipe = "QuantizationModifier" in modifiers
             if os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
                 archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
                 state_dict = torch.load(archive_file, map_location="cpu")
-                removed_keys = [
-                    key
-                    for key in state_dict
-                    if key.startswith("bert.encoder.layer.")
-                    and (key.endswith(".module.weight") or key.endswith(".module.bias"))
-                ]
+                removed_keys = (
+                    [key for key in state_dict if (key.endswith(".module.weight") or key.endswith(".module.bias"))]
+                    if is_qat_recipe
+                    else []
+                )
                 for key in removed_keys:
                     new_key = key.replace(".module", "")
                     state_dict[new_key] = state_dict[key]
@@ -254,8 +265,5 @@ def load_recipe(pretrained_model_name_or_path):
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
         if os.path.isdir(pretrained_model_name_or_path):
             if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
-                with open(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)) as fp:
-                    recipe = json.load(fp)
-                    recipe = recipe["recipe"]
+                recipe = os.path.join(pretrained_model_name_or_path, RECIPE_NAME)
     return recipe
-
