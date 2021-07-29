@@ -218,34 +218,6 @@ class DataTrainingArguments:
                 extension = self.test_file.split(".")[-1]
                 assert extension in ["csv", "json"], "`test_file` should be a csv or a json file."
 
-def convert_example_to_features(example, tokenizer, max_seq_length, sentence1_key, sentence2_key):
-    tokens = []
-    segment_ids = []
-    tokens.append("[CLS]")
-    segment_ids.append(0)
-    for t in tokenizer.tokenize(example[sentence1_key])[:int(max_seq_length/2)]:
-        tokens.append(t)
-        segment_ids.append(0)
-    tokens.append("[SEP]")
-    segment_ids.append(0)
-    if sentence1_key != None:
-        for t in tokenizer.tokenize(example[sentence2_key])[:int(max_seq_length/2)]:
-            tokens.append(t)
-            segment_ids.append(0)
-        tokens.append("[SEP]")
-        segment_ids.append(1)
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-    input_mask = [1] * len(input_ids)
-    while len(input_ids) < max_seq_length:
-        input_ids.append(0)
-        input_mask.append(0)
-        segment_ids.append(0)
-    return (
-            torch.from_numpy(np.array([np.array(input_ids, dtype=np.int64)])),
-            torch.from_numpy(np.array([np.array(input_mask, dtype=np.int64)])),
-            torch.from_numpy(np.array([np.array(segment_ids, dtype=np.int64)])),
-        ) 
-
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
