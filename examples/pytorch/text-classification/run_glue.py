@@ -40,12 +40,15 @@ from transformers import (
     default_data_collator,
     set_seed,
 )
+from sparseml_utils import (
+    SparseMLGLUETrainer,
+    export_model,
+    preprocess_state_dict,
+    load_recipe
+)
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 
-
-# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.7.0.dev0")
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -71,7 +74,17 @@ class DataTrainingArguments:
     into argparse arguments to be able to specify them on
     the command line.
     """
-
+    recipe: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
+                  "for more information"},
+    )
+    onnx_export_path: Optional[str] = field(
+        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
+    )
+    num_exported_samples: Optional[int] = field(
+        default=20, metadata={"help": "Number of exported samples, default to 20"}
+    )
     task_name: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the task to train on: " + ", ".join(task_to_keys.keys())},
@@ -154,6 +167,15 @@ class ModelArguments:
 
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    distill_teacher: Optional[str] = field(
+        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+    )
+    distill_temperature: Optional[float] = field(
+        default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
+    )
+    distill_hardness: Optional[float] = field(
+        default=1.0, metadata={"help": "Proportion of loss coming from teacher model."}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -305,6 +327,13 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+
+    # Load and preprocess the state dict if the model existed (in this case we continue to train or
+    # evaluate the model). The preprocessing step is to restore names of parameters changed by
+    # QAT process
+    state_dict = preprocess_state_dict(model_args.model_name_or_path)
+
+
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
@@ -327,8 +356,19 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        state_dict=state_dict,
     )
 
+    teacher_model = None
+    if model_args.distill_teacher is not None:
+        teacher_model = AutoModelForSequenceClassification.from_pretrained(
+            model_args.distill_teacher,
+            from_tf=bool(".ckpt" in model_args.distill_teacher),
+            cache_dir=model_args.cache_dir,
+        )
+        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
+        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        logger.info("Teacher Model has %s parameters", params)
     # Preprocessing the datasets
     if data_args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
@@ -445,17 +485,32 @@ def main():
     else:
         data_collator = None
 
+    # Load possible existing recipe and new one passed in through command argument
+    existing_recipe = load_recipe(model_args.model_name_or_path)
+    new_recipe = data_args.recipe
+
     # Initialize our Trainer
-    trainer = Trainer(
+    trainer = SparseMLGLUETrainer(
+        model_args.model_name_or_path,
+        [existing_recipe, new_recipe],
+        teacher=teacher_model,
+        distill_hardness=model_args.distill_hardness,
+        distill_temperature=model_args.distill_temperature,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
-        compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        post_process_function=post_processing_function,
+        compute_metrics=compute_metrics,
     )
 
+    # Apply recipes to the model. This is necessary given that
+    # sparsification methods such as QAT modified the model graph with their own learnable
+    # parameters. They are also restored/loaded to the model.
+    trainer.apply_recipes()
+    
     # Training
     if training_args.do_train:
         checkpoint = None
@@ -535,6 +590,11 @@ def main():
             kwargs["dataset"] = f"GLUE {data_args.task_name.upper()}"
 
         trainer.push_to_hub(**kwargs)
+
+    if data_args.onnx_export_path:
+        logger.info("*** Export to ONNX ***")
+        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        export_model(model, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
 
 def _mp_fn(index):
