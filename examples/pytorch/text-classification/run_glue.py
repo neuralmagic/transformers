@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+import wandb
 import numpy as np
 from datasets import load_dataset, load_metric
 
@@ -367,7 +368,7 @@ def main():
             cache_dir=model_args.cache_dir,
         )
         teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
-        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        params = sum([np.prod(p.size()) for p in teacher_model_parameters])
         logger.info("Teacher Model has %s parameters", params)
     # Preprocessing the datasets
     if data_args.task_name is not None:
