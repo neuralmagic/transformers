@@ -18,7 +18,7 @@ from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.models.bert.modeling_bert import BertForSequenceClassification
 
 
-class SparseMLGLUErainer(Trainer):
+class SparseMLGLUETrainer(Trainer):
     """
     GLUE trainer with SparseML integration
 
