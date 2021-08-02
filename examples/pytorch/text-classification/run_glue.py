@@ -170,7 +170,7 @@ class ModelArguments:
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     distill_teacher: Optional[str] = field(
-        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+        default=None, metadata={"help": "Teacher model which needs to be a trained text classification model"}
     )
     distill_temperature: Optional[float] = field(
         default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
