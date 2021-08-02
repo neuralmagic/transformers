@@ -121,7 +121,7 @@ class SparseMLGLUETrainer(Trainer):
             self.teacher = self.teacher.to(input_device)
             logits_student = outputs["logits"]
             with torch.no_grad():
-                teacher_output = self.teacher(
+                teacher_outputs = self.teacher(
                     input_ids=inputs["input_ids"],
                     token_type_ids=inputs["token_type_ids"],
                     attention_mask=inputs["attention_mask"],
