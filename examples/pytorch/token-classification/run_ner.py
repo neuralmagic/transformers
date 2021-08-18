@@ -42,6 +42,9 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.sparse import export_model, load_recipe, preprocess_state_dict
+
+from sparseml_utils import TokenClassificationModuleExporter, SparseMLTokenClassificationTrainer
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -58,6 +61,15 @@ class ModelArguments:
 
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
+    )
+    distill_teacher: Optional[str] = field(
+        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+    )
+    distill_temperature: Optional[float] = field(
+        default=2.0, metadata={"help": "Temperature applied to teacher softmax for distillation."}
+    )
+    distill_hardness: Optional[float] = field(
+        default=0.5, metadata={"help": "Proportion of loss coming from teacher model."}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -87,8 +99,22 @@ class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
-
-    task_name: Optional[str] = field(default="ner", metadata={"help": "The name of the task (ner, pos...)."})
+    recipe: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
+            "for more information"
+        },
+    )
+    onnx_export_path: Optional[str] = field(
+        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
+    )
+    num_exported_samples: Optional[int] = field(
+        default=20, metadata={"help": "Number of exported samples, default to 20"}
+    )
+    task_name: Optional[str] = field(
+        default="ner", metadata={"help": "The name of the task (ner, pos...)."}
+    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -302,6 +328,17 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
+    teacher_model = None
+    if model_args.distill_teacher is not None:
+        teacher_model = AutoModelForTokenClassification.from_pretrained(
+            model_args.distill_teacher,
+            from_tf=bool(".ckpt" in model_args.distill_teacher),
+            cache_dir=model_args.cache_dir,
+        )
+        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
+        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        logger.info("Teacher Model has %s parameters", params)
+
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
         raise ValueError(
@@ -424,8 +461,17 @@ def main():
                 "accuracy": results["overall_accuracy"],
             }
 
+    # Load possible existing recipe and new one passed in through command argument
+    existing_recipe = load_recipe(model_args.model_name_or_path)
+    new_recipe = data_args.recipe
+
     # Initialize our Trainer
-    trainer = Trainer(
+    trainer = SparseMLTokenClassificationTrainer(
+        model_args.model_name_or_path,
+        [existing_recipe, new_recipe],
+        teacher=teacher_model,
+        distill_hardness=model_args.distill_hardness,
+        distill_temperature=model_args.distill_temperature,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
