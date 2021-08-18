@@ -36,7 +36,6 @@ from transformers import (
     DataCollatorForTokenClassification,
     HfArgumentParser,
     PreTrainedTokenizerFast,
-    Trainer,
     TrainingArguments,
     set_seed,
 )
@@ -336,7 +335,7 @@ def main():
             cache_dir=model_args.cache_dir,
         )
         teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
-        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
+        params = sum([np.prod(p.size()) for p in teacher_model_parameters])
         logger.info("Teacher Model has %s parameters", params)
 
     # Tokenizer check: this script requires a fast tokenizer.
@@ -547,6 +546,12 @@ def main():
                 kwargs["dataset"] = data_args.dataset_name
 
         trainer.push_to_hub(**kwargs)
+
+    if data_args.onnx_export_path:
+        logger.info("*** Export to ONNX ***")
+        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        exporter = TokenClassificationModuleExporter(model, output_dir=data_args.onnx_export_path)
+        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
 
 def _mp_fn(index):
