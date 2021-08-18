@@ -45,7 +45,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 from transformers.sparse import export_model, load_recipe, preprocess_state_dict
 
-from sparseml_utils import MultipleChoiceModuleExporter, SparseMLMultipleChoiceOutputTrainer
+from sparseml_utils import MultipleChoiceModuleExporter, SparseMLMultipleChoiceTrainer
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.7.0.dev0")
 
@@ -323,6 +323,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+
     teacher_model = None
     if model_args.distill_teacher is not None:
         teacher_model = AutoModelForMultipleChoice.from_pretrained(

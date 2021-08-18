@@ -5,13 +5,13 @@ import torch
 import torch.nn.functional as F
 
 from sparseml.pytorch.utils import ModuleExporter
-from transformers.modeling_outputs import MultipleChoiceOutput
+from transformers.modeling_outputs import MultipleChoiceModelOutput
 from transformers.sparse import SparseMLTrainer
 
 
-class SparseMLMultipleChoiceOutputTrainer(SparseMLTrainer):
+class SparseMLMultipleChoiceTrainer(SparseMLTrainer):
     """
-    MultipleChoiceOutput trainer with SparseML integration
+    MultipleChoice trainer with SparseML integration
 
     :param recipe: recipe for model sparsification
     :param teacher: teacher model for distillation
@@ -49,15 +49,15 @@ class SparseMLMultipleChoiceOutputTrainer(SparseMLTrainer):
         return (loss, outputs) if return_outputs else loss
 
 
-class MultipleChoiceOutputModuleExporter(ModuleExporter):
+class MultipleChoiceModuleExporter(ModuleExporter):
     """
     Module exporter class for Question Answering
     """
 
     @classmethod
     def get_output_names(self, out: Any):
-        if not isinstance(out, MultipleChoiceOutput):
-            raise ValueError("Expected MultipleChoiceOutput, got {type(out)}")
+        if not isinstance(out, MultipleChoiceModelOutput):
+            raise ValueError("Expected MultipleChoiceModelOutput, got {type(out)}")
         expected = ["start_logits", "end_logits"]
         if numpy.any([name for name in expected if name not in out]):
             raise ValueError("Expected output names not found in model output")
