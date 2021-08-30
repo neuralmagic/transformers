@@ -1217,7 +1217,7 @@ class Trainer:
         for epoch in range(epochs_trained, num_train_epochs):
             if self.use_amp and hasattr(self, "qat_active") and callable(self.qat_active) and self.qat_active(epoch):
                 logger.info("entering QAT phase, disabling FP16 training")
-                self.use_amp = False
+                self.scaler._enabled = False
 
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
@@ -1736,7 +1736,7 @@ class Trainer:
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
         if self.use_amp:
-            with autocast():
+            with autocast(enabled=self.scaler.is_enabled()):
                 loss = self.compute_loss(model, inputs)
         else:
             loss = self.compute_loss(model, inputs)
@@ -2381,7 +2381,7 @@ class Trainer:
                 else:
                     loss = None
                     if self.use_amp:
-                        with autocast():
+                        with autocast(enabled=self.scaler.is_enabled()):
                             outputs = model(**inputs)
                     else:
                         outputs = model(**inputs)
