@@ -488,7 +488,7 @@ def main():
     new_recipe = data_args.recipe
 
     # Initialize our Trainer
-    trainer = SparseMLGLUETrainer(
+    trainer = SparseMLTrainer(
         model_args.model_name_or_path,
         [existing_recipe, new_recipe],
         teacher=teacher_model,
