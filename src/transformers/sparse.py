@@ -2,7 +2,7 @@ import collections
 import inspect
 import math
 import os
-from typing import Any, Optional
+from typing import Optional
 
 import numpy
 import torch
@@ -11,16 +11,14 @@ import torch.nn.functional as F
 import onnxruntime
 from sparseml.pytorch.optim.manager import ScheduledModifierManager
 from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
-from sparseml.pytorch.utils import ModuleExporter, logger
-from trainer_qa import QuestionAnsweringTrainer
+from sparseml.pytorch.utils import logger
+from transformers import Trainer
 from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
-from transformers.modeling_outputs import QuestionAnsweringModelOutput
-from transformers.models.bert.modeling_bert import BertForQuestionAnswering
 
 
-class SparseMLQATrainer(QuestionAnsweringTrainer):
+class SparseMLTrainer(Trainer):
     """
-    Question Answering trainer with SparseML integration
+    Trainer with SparseML integration
 
     :param recipe: recipe for model sparsification
     :param teacher: teacher model for distillation
@@ -82,7 +80,7 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
                         # case of evaluating pruned or pruned quantized models
                         # Otherwise, we're in use cases such as quantizing a block pruned model in which
                         # new parameters need to be initialized and trained during the QAT process
-                        _, missing_keys, unexpected_keys, _ = BertForQuestionAnswering._load_state_dict_into_model(
+                        _, missing_keys, unexpected_keys, _ = self.model._load_state_dict_into_model(
                             self.model, state_dict, self.model_name_or_path, _fast_init=False
                         )
                         if missing_keys or unexpected_keys:
@@ -91,6 +89,54 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
                                 f"Missing keys: {missing_keys}\n"
                                 f"Unexpected keys: {unexpected_keys}\n"
                             )
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        Computing loss using teacher/student distillation
+        """
+        if not self.recipes and self.teachers is None:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs)
+
+        outputs = model(**inputs)
+        if self.teachers is None:
+            loss = outputs["loss"]
+        else:
+            logits_student = outputs["logits"]
+            if self.multi_gpu:
+                input_ids = torch.split(inputs['input_ids'], int(inputs['input_ids'].shape[0]/self.num_gpus))
+                token_type_ids = torch.split(inputs['token_type_ids'], int(inputs['token_type_ids'].shape[0]/self.num_gpus))
+                attention_mask = torch.split(inputs['attention_mask'], int(inputs['attention_mask'].shape[0]/self.num_gpus))
+                logits_teacher = torch.empty((0,inputs['input_ids'].shape[1]), dtype=torch.int32, device='cuda')
+                for i in range(self.num_gpus):
+                    with torch.no_grad():
+                        input_device = self.teachers[i].device
+                        teacher_output = self.teachers[i](
+                            input_ids=input_ids[i].to(input_device),
+                            token_type_ids=token_type_ids[i].to(input_device),
+                            attention_mask=attention_mask[i].to(input_device)
+                        )
+                    logits_teacher = torch.cat((logits_teacher, teacher_output["logits"].to('cuda')), dim=0)
+            else: # CPU or single GPU
+                input_device = inputs["input_ids"].device
+                self.teachers = self.teachers.to(input_device)
+                with torch.no_grad():
+                    teacher_output = self.teachers(
+                        input_ids=inputs["input_ids"],
+                        token_type_ids=inputs["token_type_ids"],
+                        attention_mask=inputs["attention_mask"],
+                    )
+                logits_teacher = teacher_output["start_logits"]
+
+            teacher_loss = (F.kl_div(
+                    input=F.log_softmax(logits_student / self.distill_temperature, dim=-1),
+                    target=F.softmax(logits_teacher / self.distill_temperature, dim=-1),
+                    reduction="batchmean",
+                )
+                * (self.distill_temperature ** 2)
+            )
+            
+            loss = ((1 - self.distill_hardness) * outputs["loss"]) + (self.distill_hardness * teacher_loss)
+        return (loss, outputs) if return_outputs else loss
 
     def create_optimizer(self):
         """
@@ -112,66 +158,6 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
                 self.optimizer, self.model, self.manager, steps_per_epoch=steps_per_epoch, loggers=self.loggers
             )
 
-    def compute_loss(self, model, inputs, return_outputs=False):
-        """
-        Computing loss using teacher/student distillation
-        """
-        if not self.recipes and self.teachers is None:
-            return super().compute_loss(model, inputs, return_outputs=return_outputs)
-
-        outputs = model(**inputs)
-        if self.teachers is None:
-            loss = outputs["loss"]
-        else:
-            start_logits_student = outputs["start_logits"]
-            end_logits_student = outputs["end_logits"]
-            start_logits_label = inputs["start_positions"]
-            end_logits_label = inputs["end_positions"]
-            if self.multi_gpu:
-                input_ids = torch.split(inputs['input_ids'], int(inputs['input_ids'].shape[0]/self.num_gpus))
-                start_logits_teacher = torch.empty((0,inputs['input_ids'].shape[1]), dtype=torch.int32, device='cuda')
-                end_logits_teacher = torch.empty((0,inputs['input_ids'].shape[1]), dtype=torch.int32, device='cuda')
-                for i in range(self.num_gpus):
-                    with torch.no_grad():
-                        input_device = self.teachers[i].device
-                        teacher_output = self.teachers[i](input_ids[i].to(input_device))
-                    start_logits_teacher = torch.cat((start_logits_teacher, teacher_output["start_logits"].to('cuda')), dim=0)
-                    end_logits_teacher = torch.cat((end_logits_teacher, teacher_output["end_logits"].to('cuda')), dim=0)
-            else: # CPU or single GPU
-                input_device = inputs["input_ids"].device
-                self.teachers = self.teachers.to(input_device)
-                with torch.no_grad():
-                    teacher_output = self.teachers(
-                        input_ids=inputs["input_ids"],
-                        token_type_ids=inputs["token_type_ids"],
-                        attention_mask=inputs["attention_mask"],
-                    )
-                start_logits_teacher = teacher_output["start_logits"]
-                end_logits_teacher = teacher_output["end_logits"]
-
-            loss_start = (
-                F.kl_div(
-                    input=F.log_softmax(start_logits_student / self.distill_temperature, dim=-1),
-                    target=F.softmax(start_logits_teacher / self.distill_temperature, dim=-1),
-                    reduction="batchmean",
-                )
-                * (self.distill_temperature ** 2)
-            )
-            loss_end = (
-                F.kl_div(
-                    input=F.log_softmax(end_logits_student / self.distill_temperature, dim=-1),
-                    target=F.softmax(end_logits_teacher / self.distill_temperature, dim=-1),
-                    reduction="batchmean",
-                )
-                * (self.distill_temperature ** 2)
-            )
-            teacher_loss = (loss_start + loss_end) / 2.0
-            loss_start = self.criterion(start_logits_student, start_logits_label)
-            loss_end = self.criterion(end_logits_student, end_logits_label)
-            label_loss = (loss_start + loss_end) / 2.0
-            loss = ((1 - self.distill_hardness) * label_loss) + (self.distill_hardness * teacher_loss)
-        return (loss, outputs) if return_outputs else loss
-
     def save_model(self, output_dir: Optional[str] = None):
         """
         Save model during or after training. The sparsification recipe will also be saved.
@@ -186,29 +172,13 @@ class SparseMLQATrainer(QuestionAnsweringTrainer):
         self.manager.save(output_recipe_file)
 
 
-class QuestionAnsweringModuleExporter(ModuleExporter):
-    """
-    Module exporter class for Question Answering
-    """
-
-    @classmethod
-    def get_output_names(self, out: Any):
-        if not isinstance(out, QuestionAnsweringModelOutput):
-            raise ValueError("Expected QuestionAnsweringModelOutput, got {type(out)}")
-        expected = ["start_logits", "end_logits"]
-        if numpy.any([name for name in expected if name not in out]):
-            raise ValueError("Expected output names not found in model output")
-        return expected
-
-
-def export_model(model, dataloader, output_dir, num_exported_samples):
+def export_model(exporter, dataloader, output_dir, num_exported_samples):
     """
     Export a trained model to ONNX
-    :param model: trained model
+    :param exporter: a model exporter created from a trained model
     :param dataloader: dataloader to get sample batch
     :param output_dir: output directory for ONNX model
     """
-    exporter = QuestionAnsweringModuleExporter(model, output_dir=output_dir)
 
     sess = None
     num_samples = 0
@@ -218,9 +188,9 @@ def export_model(model, dataloader, output_dir, num_exported_samples):
     os.makedirs(sample_inputs, exist_ok=True)
     os.makedirs(sample_outputs, exist_ok=True)
 
-    forward_args_spec = inspect.getfullargspec(BertForQuestionAnswering.forward)
     for _, sample_batch in enumerate(dataloader):
         if sess is None:
+            forward_args_spec = inspect.getfullargspec(exporter._module.__class__.forward)
             one_sample_input = collections.OrderedDict(
                 [(f, sample_batch[f][0].reshape(1, -1)) for f in forward_args_spec.args if f in sample_batch]
             )
