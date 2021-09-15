@@ -158,6 +158,31 @@ class SparseMLTrainer(Trainer):
                 self.optimizer, self.model, self.manager, steps_per_epoch=steps_per_epoch, loggers=self.loggers
             )
 
+
+    def create_scheduler(self, num_training_steps: int):
+        """
+        Override LR scheduler if the SparseML manager has LR modifiers, otherwise
+        set default scheduler
+        """
+        if self.lr_scheduler is not None:
+            # scheduler already set
+            return
+
+        if self.manager is not None and self.manager.learning_rate_modifiers:
+            # allow SparseML to manage LR and set a dummy scheduler
+            self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lambda _: 1.0, -1)
+        else:
+            # default scheduler
+            super().create_scheduler(num_training_steps)
+
+    def qat_active(self, epoch: int):
+        if self.manager is None or not self.manager.quantization_modifiers:
+            return False
+
+        qat_start = min([mod.start_epoch for mod in self.manager.quantization_modifiers])
+
+        return qat_start < epoch + 1
+
     def save_model(self, output_dir: Optional[str] = None):
         """
         Save model during or after training. The sparsification recipe will also be saved.

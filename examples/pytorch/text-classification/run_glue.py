@@ -42,8 +42,8 @@ from transformers import (
     set_seed,
 )
 
-from sparseml_utils import GLUEModuleExporter, SparseMLGLUETrainer
-from transformers.sparse import export_model, load_recipe, preprocess_state_dict
+from sparseml_utils import GLUEModuleExpo
+from transformers.sparse import export_model, SparseMLTrainer, load_recipe, preprocess_state_dict
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 
@@ -488,7 +488,7 @@ def main():
     new_recipe = data_args.recipe
 
     # Initialize our Trainer
-    trainer = SparseMLGLUETrainer(
+    trainer = SparseMLTrainer(
         model_args.model_name_or_path,
         [existing_recipe, new_recipe],
         teacher=teacher_model,
