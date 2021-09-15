@@ -35,7 +35,7 @@ class SparseMLTrainer(Trainer):
         self.recipes = [recipe for recipe in recipes if recipe]
         self.teachers = teacher
         self.multi_gpu = False
-        if torch.cuda.device_count():
+        if torch.cuda.device_count() and teacher != None:
             self.multi_gpu = True
             self.num_gpus = torch.cuda.device_count()
             self.teachers = [teacher for i in range(self.num_gpus)]
