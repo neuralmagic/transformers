@@ -137,7 +137,13 @@ class SparseMLTrainer(Trainer):
     def _save_recipe(self, output_dir: Optional[str] = None):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
         output_recipe_file = os.path.join(output_dir, RECIPE_NAME)
-        self.manager.save(output_recipe_file)
+        saved_mods = [
+            mod for mod in self.manager.modifiers if "LayerPruningModifier" in mod.__class__.__name__ or "QuantizationModifier" in mod.__class__.__name__
+        ]
+        if saved_mods:
+            with open(output_recipe_file, "w") as yaml_file:
+                for mod in saved_mods:
+                    yaml_file.write(str(mod))
 
 
 def export_model(exporter, dataloader, output_dir, num_exported_samples):
