@@ -1,10 +1,8 @@
 from typing import Any
 
 import numpy
-import torch
-import torch.nn.functional as F
 
-from sparseml.pytorch.utils import ModuleExporter, device_of
+from sparseml.pytorch.utils import ModuleExporter
 from trainer_qa import QuestionAnsweringTrainer
 from transformers.modeling_outputs import QuestionAnsweringModelOutput
 from transformers.sparse import SparseMLTrainer
@@ -31,14 +29,9 @@ class SparseMLQATrainer(SparseMLTrainer, QuestionAnsweringTrainer):
         student_outputs = model(**inputs)
         loss = student_outputs["loss"]
 
-        target_device = device_of(inputs)
-        self.teacher.to(target_device)
-        with torch.no_grad():
-            teacher_outputs = self.teacher(
-                input_ids=inputs["input_ids"],
-                token_type_ids=inputs["token_type_ids"],
-                attention_mask=inputs["attention_mask"],
-            )
+        teacher_input_keys = ["input_ids", "token_type_ids", "attention_mask"]
+        teacher_inputs = {k: inputs[k] for k in teacher_input_keys}
+
         steps_in_epoch = -1  # Unused
         loss = self.manager.loss_update(
             loss,
@@ -48,7 +41,7 @@ class SparseMLQATrainer(SparseMLTrainer, QuestionAnsweringTrainer):
             steps_in_epoch,
             global_step=self.state.global_step,
             student_outputs=student_outputs,
-            teacher_outputs=teacher_outputs,
+            teacher_inputs=teacher_inputs,
         )
         return (loss, student_outputs) if return_outputs else loss
 
