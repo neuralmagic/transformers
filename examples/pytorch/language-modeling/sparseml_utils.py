@@ -1,9 +1,8 @@
 from typing import Any
 
 import numpy
-import torch
 
-from sparseml.pytorch.utils import ModuleExporter, device_of
+from sparseml.pytorch.utils import ModuleExporter
 from transformers.sparse import SparseMLTrainer
 
 
@@ -27,11 +26,6 @@ class SparseMLMaskedLanguageModelingTrainer(SparseMLTrainer):
         student_outputs = model(**inputs)
         loss = student_outputs["loss"]
 
-        target_device = device_of(inputs)
-        self.teacher.to(target_device)
-        with torch.no_grad():
-            teacher_outputs = self.teacher(**inputs)
-
         steps_in_epoch = -1  # Unused
         loss = self.manager.loss_update(
             loss,
@@ -41,7 +35,7 @@ class SparseMLMaskedLanguageModelingTrainer(SparseMLTrainer):
             steps_in_epoch,
             global_step=self.state.global_step,
             student_outputs=student_outputs,
-            teacher_outputs=teacher_outputs,
+            teacher_inputs=inputs,
         )
         return (loss, student_outputs) if return_outputs else loss
 

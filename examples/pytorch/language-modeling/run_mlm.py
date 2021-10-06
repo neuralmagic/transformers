@@ -510,6 +510,11 @@ def main():
         compute_metrics=compute_metrics,
     )
 
+    # Apply recipes to the model. This is necessary given that
+    # sparsification methods such as QAT modified the model graph with their own learnable
+    # parameters. They are also restored/loaded to the model.
+    trainer.apply_recipes()
+
     # Training
     if training_args.do_train:
         checkpoint = None
