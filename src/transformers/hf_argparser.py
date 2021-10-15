@@ -14,6 +14,7 @@
 
 import dataclasses
 import json
+import os
 import re
 import sys
 from argparse import ArgumentParser, ArgumentTypeError
@@ -254,6 +255,15 @@ def _download_dataclass_zoo_stub_files(data_class: DataClass):
         assert framework_file_paths, (
             "Unable to download any framework files for SparseZoo stub {val}"
         )
+        framework_file_names = [os.path.basename(path) for path in framework_file_paths]
+        if "pytorch_model.bin" not in framework_file_names or (
+            "config.json" not in framework_file_names
+        ):
+            raise RuntimeError(
+                "Unable to find 'pytorch_model.bin' and 'config.json' in framework "
+                f"files downloaded from {val}. Found {framework_file_names}. Check "
+                "if the given stub is for a transformers repo model"
+            )
         framework_dir_path = Path(framework_file_paths[0]).parent.absolute()
 
         logger.info(
