@@ -29,7 +29,7 @@ import numpy as np
 from datasets import ClassLabel, load_dataset, load_metric
 
 import transformers
-from sparseml_utils import SparseMLTokenClassificationTrainer, TokenClassificationModuleExporter
+from sparseml_utils import TokenClassificationModuleExporter
 from transformers import (
     AutoConfig,
     AutoModelForTokenClassification,
@@ -40,7 +40,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
-from transformers.sparse import export_model, load_recipe, preprocess_state_dict
+from transformers.sparse import SparseMLTrainer, export_model, load_recipe, preprocess_state_dict
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
 
@@ -464,7 +464,7 @@ def main():
     new_recipe = data_args.recipe
 
     # Initialize our Trainer
-    trainer = SparseMLTokenClassificationTrainer(
+    trainer = SparseMLTrainer(
         model_args.model_name_or_path,
         [existing_recipe, new_recipe],
         teacher=teacher_model,
