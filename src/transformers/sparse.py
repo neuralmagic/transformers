@@ -1,8 +1,9 @@
 import collections
 import inspect
+import json
 import math
 import os
-from typing import Optional
+from typing import Dict, Optional
 
 import numpy
 import torch
@@ -27,7 +28,7 @@ class SparseMLTrainer(Trainer):
     :param args, kwargs: arguments passed into parent class
     """
 
-    def __init__(self, model_name_or_path, recipes, teacher=None, *args, **kwargs):
+    def __init__(self, model_name_or_path, recipes, teacher=None, recipe_args=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_name_or_path = str(model_name_or_path)
         self.recipes = [recipe for recipe in recipes if recipe]
@@ -36,10 +37,17 @@ class SparseMLTrainer(Trainer):
             self.teacher.eval()
         self.criterion = torch.nn.CrossEntropyLoss()
 
+        if recipe_args is not None:
+            recipe_args = json.loads(recipe_args)
+            if not isinstance(recipe_args, Dict):
+                raise ValueError("Cannot convert recipe arguments into dictionary")
+        else:
+            recipe_args = {}
+
         manager = None
         modifiers = []
         for recipe in self.recipes:
-            manager = ScheduledModifierManager.from_yaml(recipe, modifiers)
+            manager = ScheduledModifierManager.from_yaml(recipe, modifiers, **recipe_args)
             modifiers = manager.modifiers
         self.manager = manager
 
