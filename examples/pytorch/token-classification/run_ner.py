@@ -104,6 +104,12 @@ class DataTrainingArguments:
             "for more information"
         },
     )
+    recipe_args: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Recipe arguments to be overwritten"
+        },
+    )
     onnx_export_path: Optional[str] = field(
         default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
     )
@@ -561,6 +567,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+        recipe_args=data_args.recipe_args
     )
 
     # Apply recipes to the model. This is necessary given that
