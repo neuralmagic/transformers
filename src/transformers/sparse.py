@@ -96,9 +96,8 @@ class SparseMLTrainer(Trainer):
         super().create_optimizer()
         if not self.recipes:
             return
-        steps_per_epoch = math.ceil(
-            len(self.train_dataset) / (self.args.per_device_train_batch_size * self.args._n_gpu)
-        )
+        total_batch_size = self.args.per_device_train_batch_size * self.args._n_gpu * self.args.gradient_accumulation_steps
+        steps_per_epoch = math.ceil(len(self.train_dataset) / total_batch_size)
         self.args.num_train_epochs = float(self.manager.max_epochs)
         if hasattr(self, "scaler"):
             self.scaler = self.manager.modify(
