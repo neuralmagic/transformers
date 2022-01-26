@@ -2779,6 +2779,9 @@ else:
         __file__ = globals()["__file__"]
         __path__ = [os.path.dirname(__file__)]
 
+        # flag to signal NM integration is active
+        NM_INTEGRATED = True
+
         def _get_module(self, module_name: str):
             return importlib.import_module("." + module_name, self.__name__)
 
