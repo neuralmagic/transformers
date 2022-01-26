@@ -4300,6 +4300,7 @@ if TYPE_CHECKING:
 else:
     import sys
 
+<<<<<<< HEAD
     sys.modules[__name__] = _LazyModule(
         __name__,
         globals()["__file__"],
@@ -4307,6 +4308,29 @@ else:
         module_spec=__spec__,
         extra_objects={"__version__": __version__},
     )
+=======
+    class _LazyModule(_BaseLazyModule):
+        """
+        Module class that surfaces all objects but only performs associated imports when the objects are requested.
+        """
+
+        __file__ = globals()["__file__"]
+        __path__ = [os.path.dirname(__file__)]
+
+        # flag to signal NM integration is active
+        NM_INTEGRATED = True
+
+        def _get_module(self, module_name: str):
+            return importlib.import_module("." + module_name, self.__name__)
+
+        def __getattr__(self, name: str):
+            # Special handling for the version, which is a constant from this module and not imported in a submodule.
+            if name == "__version__":
+                return __version__
+            return super().__getattr__(name)
+
+    sys.modules[__name__] = _LazyModule(__name__, _import_structure)
+>>>>>>> 410f9dbfc... add flag to signal NM integration is active (#32)
 
 
 if not is_tf_available() and not is_torch_available() and not is_flax_available():
