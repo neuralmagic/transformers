@@ -9,10 +9,10 @@ import numpy
 import torch
 
 import onnxruntime
-from sparseml.pytorch.optim import LayerPruningModifier, QuantizationModifier
 from sparseml.pytorch.optim.manager import ScheduledModifierManager
 from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
 from sparseml.pytorch.utils import logger
+from sparseml.pytorch.sparsification import LayerPruningModifier, QuantizationModifier
 from transformers import Trainer
 from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
 
