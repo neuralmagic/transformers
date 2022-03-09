@@ -1984,7 +1984,7 @@ class Trainer:
             loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps, scaler=scaler)
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
-        with self.autocast_smart_context_manager(enabled = self.scaler.is_enabled()):
+        with self.autocast_smart_context_manager(enabled=self.scaler.is_enabled()):
             loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:

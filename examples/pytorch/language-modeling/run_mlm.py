@@ -30,8 +30,8 @@ from itertools import chain
 from typing import Optional
 
 import datasets
-from datasets import load_dataset, load_metric, concatenate_datasets
 import numpy
+from datasets import concatenate_datasets, load_dataset, load_metric
 
 import transformers
 from sparseml_utils import MaskedLanguageModelingModuleExporter, SparseMLMaskedLanguageModelingTrainer
@@ -85,8 +85,10 @@ class ModelArguments:
             "help": "Override some existing default config settings when a model is trained from scratch. Example: "
             "n_embd=10,resid_pdrop=0.2,scale_attn_weights=false,summary_type=cls_index"
         },
+    )
     distill_teacher: Optional[str] = field(
-        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+        default=None,
+        metadata={"help": "Teacher model which needs to be a trained QA model"},
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -136,9 +138,7 @@ class DataTrainingArguments:
     )
     recipe_args: Optional[str] = field(
         default=None,
-        metadata={
-            "help": "Recipe arguments to be overwritten"
-        },
+        metadata={"help": "Recipe arguments to be overwritten"},
     )
     onnx_export_path: Optional[str] = field(
         default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
@@ -535,6 +535,7 @@ def main():
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
 
+    compute_metrics = None
     if training_args.do_eval:
         if "validation" not in tokenized_datasets:
             raise ValueError("--do_eval requires a validation dataset")
@@ -575,7 +576,6 @@ def main():
     existing_recipe = load_recipe(model_args.model_name_or_path)
     new_recipe = data_args.recipe
 
-    compute_metrics = None
     # Initialize our Trainer
     trainer = SparseMLMaskedLanguageModelingTrainer(
         model_args.model_name_or_path,
