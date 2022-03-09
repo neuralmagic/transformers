@@ -1,0 +1,269 @@
+import collections
+import inspect
+import json
+import math
+import os
+from typing import Dict, Optional
+
+import numpy
+import torch
+
+import onnxruntime
+from sparseml.pytorch.optim.manager import ScheduledModifierManager
+from sparseml.pytorch.optim.optimizer import ScheduledOptimizer
+from sparseml.pytorch.utils import logger
+from sparseml.pytorch.sparsification import LayerPruningModifier, QuantizationModifier
+from transformers import Trainer
+from transformers.file_utils import RECIPE_NAME, WEIGHTS_NAME
+
+
+class SparseMLTrainer(Trainer):
+    """
+    Trainer with SparseML integration
+
+    :param recipe: recipe for model sparsification
+    :param teacher: teacher model for distillation
+    :param distill_hardness: ratio of loss by teacher targets (between 0 and 1)
+    :param distill_temperature: temperature for distillation
+    :param args, kwargs: arguments passed into parent class
+    """
+
+    def __init__(self, model_name_or_path, recipes, teacher=None, recipe_args=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_name_or_path = str(model_name_or_path)
+        self.recipes = [recipe for recipe in recipes if recipe]
+        self.teacher = teacher
+        if self.teacher is not None:
+            self.teacher.eval()
+        self.criterion = torch.nn.CrossEntropyLoss()
+
+        if recipe_args is not None:
+            recipe_args = json.loads(recipe_args)
+            if not isinstance(recipe_args, Dict):
+                raise ValueError("Cannot convert recipe arguments into dictionary")
+        else:
+            recipe_args = {}
+
+        manager = None
+        modifiers = []
+        for recipe in self.recipes:
+            manager = ScheduledModifierManager.from_yaml(recipe, modifiers, **recipe_args)
+            modifiers = manager.modifiers
+        self.manager = manager
+
+        self.loggers = None
+        if self.recipes is not None:
+            loggers = []
+            if "wandb" in self.args.report_to:
+                loggers.append(logger.WANDBLogger())
+            self.loggers = loggers
+
+    def apply_recipes(self, epoch=0.0):
+        """
+        Apply architecture changing modifiers and sparsification related parameters to the model
+        """
+        if self.manager is not None:
+            org_state_dict = self.model.state_dict()
+            self.manager.initialize(self.model, epoch=epoch, distillation_teacher=self.teacher, loggers=self.loggers)
+            new_state_dict = self.model.state_dict()
+            new_params = [p for p in new_state_dict.keys() if p not in org_state_dict]
+
+            if os.path.isdir(self.model_name_or_path):
+                if os.path.isfile(os.path.join(self.model_name_or_path, WEIGHTS_NAME)):
+                    archive_file = os.path.join(self.model_name_or_path, WEIGHTS_NAME)
+                    state_dict = torch.load(archive_file, map_location="cpu")
+                    new_params_to_init = [p for p in new_params if p in state_dict.keys()]
+                    if new_params_to_init:
+                        # If we're here, the assumption is that all the new parameters introduced
+                        # by the recipes are available to be restore from the checkpoint---this is
+                        # case of evaluating pruned or pruned quantized models
+                        # Otherwise, we're in use cases such as quantizing a block pruned model in which
+                        # new parameters need to be initialized and trained during the QAT process
+                        _, missing_keys, unexpected_keys, _ = self.model._load_state_dict_into_model(
+                            self.model, state_dict, self.model_name_or_path, _fast_init=False
+                        )
+                        if missing_keys or unexpected_keys:
+                            raise RuntimeError(
+                                "Unexpected or missing keys detected when applying recipes to models\n"
+                                f"Missing keys: {missing_keys}\n"
+                                f"Unexpected keys: {unexpected_keys}\n"
+                            )
+
+    def create_optimizer(self):
+        """
+        Create optimizer customized using SparseML
+        """
+        super().create_optimizer()
+        if not self.recipes:
+            return
+        total_batch_size = self.args.per_device_train_batch_size * self.args._n_gpu * self.args.gradient_accumulation_steps
+        steps_per_epoch = math.ceil(len(self.train_dataset) / total_batch_size)
+        self.args.num_train_epochs = float(self.manager.max_epochs)
+        if hasattr(self, "scaler"):
+            self.scaler = self.manager.modify(
+                self.model, self.optimizer, steps_per_epoch=steps_per_epoch, wrap_optim=self.scaler
+            )
+        else:
+            self.optimizer = ScheduledOptimizer(
+                self.optimizer, self.model, self.manager, steps_per_epoch=steps_per_epoch, loggers=self.loggers
+            )
+
+    def create_scheduler(self, num_training_steps: int):
+        """
+        Override LR scheduler if the SparseML manager has LR modifiers, otherwise
+        set default scheduler
+        """
+        if self.lr_scheduler is not None:
+            # scheduler already set
+            return
+
+        if self.manager is not None and self.manager.learning_rate_modifiers:
+            # allow SparseML to manage LR and set a dummy scheduler
+            self.lr_scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lambda _: 1.0, -1)
+        else:
+            # default scheduler
+            super().create_scheduler(num_training_steps)
+
+    def qat_active(self, epoch: int):
+        if self.manager is None or not self.manager.quantization_modifiers:
+            return False
+
+        qat_start = min([mod.start_epoch for mod in self.manager.quantization_modifiers])
+
+        return qat_start < epoch + 1
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        Computing loss using teacher/student distillation
+        """
+        if not self.recipes or self.teacher is None:
+            return super().compute_loss(model, inputs, return_outputs=return_outputs)
+        student_outputs = model(**inputs)
+        loss = student_outputs["loss"]
+
+        steps_in_epoch = -1  # Unused
+        loss = self.manager.loss_update(
+            loss,
+            model,
+            self.optimizer,
+            self.state.epoch,
+            steps_in_epoch,
+            global_step=self.state.global_step,
+            student_outputs=student_outputs,
+            teacher_inputs=inputs,
+        )
+        return (loss, student_outputs) if return_outputs else loss
+
+    def save_model(self, output_dir: Optional[str] = None):
+        """
+        Save model during or after training. Modifiers that change the model architecture will also be saved.
+        """
+        super().save_model(output_dir=output_dir)
+        if self.manager is not None:
+            self._save_arch_modifiers(output_dir=output_dir)
+
+    def _save_arch_modifiers(self, output_dir: Optional[str] = None):
+        """
+        Save modifiers that change the model's architecture, which is to be applied
+        later on whenever the model is loaded
+        """
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        output_recipe_file = os.path.join(output_dir, RECIPE_NAME)
+        saved_mods = [
+            mod
+            for mod in self.manager.modifiers
+            if isinstance(mod, QuantizationModifier) or isinstance(mod, LayerPruningModifier)
+        ]
+        if saved_mods:
+            with open(output_recipe_file, "a") as yaml_file:
+                for mod in saved_mods:
+                    yaml_file.write(str(mod) + "\n\n")
+
+
+def export_model(exporter, dataloader, output_dir, num_exported_samples):
+    """
+    Export a trained model to ONNX
+    :param exporter: a model exporter created from a trained model
+    :param dataloader: dataloader to get sample batch
+    :param output_dir: output directory for ONNX model
+    """
+
+    sess = None
+    num_samples = 0
+
+    sample_inputs = os.path.join(output_dir, "sample-inputs")
+    sample_outputs = os.path.join(output_dir, "sample-outputs")
+    os.makedirs(sample_inputs, exist_ok=True)
+    os.makedirs(sample_outputs, exist_ok=True)
+
+    for _, sample_batch in enumerate(dataloader):
+        sample_batch.pop("labels", None)
+        if sess is None:
+            forward_args_spec = inspect.getfullargspec(exporter._module.__class__.forward)
+            one_sample_input = collections.OrderedDict(
+                [(f, sample_batch[f][0].reshape(1, -1)) for f in forward_args_spec.args if f in sample_batch]
+            )
+
+            try:
+                exporter.export_onnx(sample_batch=one_sample_input, convert_qat=True)
+                onnx_file = os.path.join(output_dir, "model.onnx")
+            except Exception:
+                raise RuntimeError("Error exporting ONNX models and/or inputs/outputs")
+
+            sess = onnxruntime.InferenceSession(onnx_file)
+
+        input_names = list(sample_batch.keys())
+        output_names = [o.name for o in sess.get_outputs()]
+        for input_vals in zip(*sample_batch.values()):
+            input_feed = {k: v.numpy() for k, v in zip(input_names, input_vals)}
+            output_vals = sess.run(output_names, {k: input_feed[k].reshape(1, -1) for k in input_feed})
+            output_dict = {name: numpy.squeeze(val) for name, val in zip(output_names, output_vals)}
+            file_idx = f"{num_samples}".zfill(4)
+            numpy.savez(f"{sample_inputs}/inp-{file_idx}.npz", **input_feed)
+            numpy.savez(f"{sample_outputs}/out-{file_idx}.npz", **output_dict)
+            num_samples += 1
+            if num_samples >= num_exported_samples:
+                return
+
+
+def preprocess_state_dict(pretrained_model_name_or_path):
+    """
+    Restore original parameter names that were changed by QAT process
+    """
+    state_dict = None
+    if pretrained_model_name_or_path is not None:
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
+                recipe = os.path.join(pretrained_model_name_or_path, RECIPE_NAME)
+                manager = ScheduledModifierManager.from_yaml(recipe)
+                modifiers = [m.__class__.__name__ for m in manager.modifiers]
+                is_qat_recipe = "QuantizationModifier" in modifiers
+            else:
+                is_qat_recipe = False
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)):
+                archive_file = os.path.join(pretrained_model_name_or_path, WEIGHTS_NAME)
+                state_dict = torch.load(archive_file, map_location="cpu")
+                removed_keys = (
+                    [key for key in state_dict if (key.endswith(".module.weight") or key.endswith(".module.bias"))]
+                    if is_qat_recipe
+                    else []
+                )
+                for key in removed_keys:
+                    new_key = key.replace(".module", "")
+                    state_dict[new_key] = state_dict[key]
+                    state_dict.pop(key)
+    return state_dict
+
+
+def load_recipe(pretrained_model_name_or_path):
+    """
+    Load recipe from the model directory
+    """
+    recipe = None
+    if pretrained_model_name_or_path is not None:
+        pretrained_model_name_or_path = str(pretrained_model_name_or_path)
+        if os.path.isdir(pretrained_model_name_or_path):
+            if os.path.isfile(os.path.join(pretrained_model_name_or_path, RECIPE_NAME)):
+                recipe = os.path.join(pretrained_model_name_or_path, RECIPE_NAME)
+    return recipe
