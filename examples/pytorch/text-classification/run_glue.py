@@ -622,6 +622,12 @@ def main():
         exporter = GLUEModuleExporter(model, output_dir=data_args.onnx_export_path)
         export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
 
+    if data_args.onnx_export_path:
+        logger.info("*** Export to ONNX ***")
+        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
+        exporter = GLUEModuleExporter(model, output_dir=data_args.onnx_export_path)
+        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)
