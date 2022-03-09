@@ -1943,16 +1943,16 @@ class Trainer:
 
         return inputs
 
-    def autocast_smart_context_manager(self):
+    def autocast_smart_context_manager(self, enabled):
         """
         A helper wrapper that creates an appropriate context manager for `autocast` while feeding it the desired
         arguments, depending on the situation.
         """
         if self.use_amp:
             if version.parse(torch.__version__) >= version.parse("1.10"):
-                ctx_manager = autocast(dtype=self.amp_dtype)
+                ctx_manager = autocast(dtype=self.amp_dtype, enabled=enabled)
             else:
-                ctx_manager = autocast()
+                ctx_manager = autocast(enabled=enabled)
         else:
             ctx_manager = contextlib.nullcontext() if sys.version_info >= (3, 7) else contextlib.suppress()
 
@@ -1984,7 +1984,7 @@ class Trainer:
             loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps, scaler=scaler)
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
-        with self.autocast_smart_context_manager():
+        with self.autocast_smart_context_manager(enabled = self.scaler.is_enabled()):
             loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
