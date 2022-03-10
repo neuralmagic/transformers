@@ -177,6 +177,12 @@ _import_structure = {
     ],
     "models.bert_generation": ["BertGenerationConfig"],
     "models.bert_japanese": ["BertJapaneseTokenizer", "CharacterTokenizer", "MecabTokenizer"],
+    "models.bertqat": [
+        "BERTQAT_PRETRAINED_CONFIG_ARCHIVE_MAP",
+        "BasicTokenizer",
+        "BertqatConfig",
+        "WordpieceTokenizer",
+    ],
     "models.bertweet": ["BertweetTokenizer"],
     "models.big_bird": ["BIG_BIRD_PRETRAINED_CONFIG_ARCHIVE_MAP", "BigBirdConfig"],
     "models.bigbird_pegasus": [
@@ -766,6 +772,23 @@ if is_torch_available():
             "BertGenerationEncoder",
             "BertGenerationPreTrainedModel",
             "load_tf_weights_in_bert_generation",
+        ]
+    )
+    _import_structure["models.bertqat"].extend(
+        [
+            "BERTQAT_PRETRAINED_MODEL_ARCHIVE_LIST",
+            "BertqatForMaskedLM",
+            "BertqatForMultipleChoice",
+            "BertqatForNextSentencePrediction",
+            "BertqatForPreTraining",
+            "BertqatForQuestionAnswering",
+            "BertqatForSequenceClassification",
+            "BertqatForTokenClassification",
+            "BertqatLayer",
+            "BertqatLMHeadModel",
+            "BertqatModel",
+            "BertqatPreTrainedModel",
+            "load_tf_weights_in_bertqat",
         ]
     )
     _import_structure["models.big_bird"].extend(
@@ -2494,6 +2517,12 @@ if TYPE_CHECKING:
     )
     from .models.bert_generation import BertGenerationConfig
     from .models.bert_japanese import BertJapaneseTokenizer, CharacterTokenizer, MecabTokenizer
+    from .models.bertqat import (
+        BERTQAT_PRETRAINED_CONFIG_ARCHIVE_MAP,
+        BasicTokenizer,
+        BertqatConfig,
+        WordpieceTokenizer,
+    )
     from .models.bertweet import BertweetTokenizer
     from .models.big_bird import BIG_BIRD_PRETRAINED_CONFIG_ARCHIVE_MAP, BigBirdConfig
     from .models.bigbird_pegasus import BIGBIRD_PEGASUS_PRETRAINED_CONFIG_ARCHIVE_MAP, BigBirdPegasusConfig
@@ -2990,6 +3019,21 @@ if TYPE_CHECKING:
             BertGenerationEncoder,
             BertGenerationPreTrainedModel,
             load_tf_weights_in_bert_generation,
+        )
+        from .models.bertqat import (
+            BERTQAT_PRETRAINED_MODEL_ARCHIVE_LIST,
+            BertqatForMaskedLM,
+            BertqatForMultipleChoice,
+            BertqatForNextSentencePrediction,
+            BertqatForPreTraining,
+            BertqatForQuestionAnswering,
+            BertqatForSequenceClassification,
+            BertqatForTokenClassification,
+            BertqatLayer,
+            BertqatLMHeadModel,
+            BertqatModel,
+            BertqatPreTrainedModel,
+            load_tf_weights_in_bertqat,
         )
         from .models.big_bird import (
             BIG_BIRD_PRETRAINED_MODEL_ARCHIVE_LIST,

@@ -26,6 +26,7 @@ from . import (
     bert,
     bert_generation,
     bert_japanese,
+    bertqat,
     bertweet,
     big_bird,
     bigbird_pegasus,

@@ -728,8 +728,8 @@ def check_repo_quality():
     print("Checking all models are properly tested.")
     check_all_decorator_order()
     check_all_models_are_tested()
-    print("Checking all objects are properly documented.")
-    check_all_objects_are_documented()
+    # print("Checking all objects are properly documented.")
+    # check_all_objects_are_documented()
     print("Checking all models are in at least one auto class.")
     check_all_models_are_auto_configured()
 

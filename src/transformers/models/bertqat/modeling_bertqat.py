@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""PyTorch BERT model."""
+"""PyTorch BERTQAT model."""
 
 
 import math
@@ -54,43 +54,39 @@ from ...modeling_utils import (
     prune_linear_layer,
 )
 from ...utils import logging
-from .configuration_bert import BertConfig
+from .configuration_bertqat import BertqatConfig
 
 
 logger = logging.get_logger(__name__)
 
-_CHECKPOINT_FOR_DOC = "bert-base-uncased"
-_CONFIG_FOR_DOC = "BertConfig"
+_CHECKPOINT_FOR_DOC = "NM-Bert"
+_CONFIG_FOR_DOC = "BertqatConfig"
 _TOKENIZER_FOR_DOC = "BertTokenizer"
 
-BERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
-    "bert-base-uncased",
-    "bert-large-uncased",
-    "bert-base-cased",
-    "bert-large-cased",
-    "bert-base-multilingual-uncased",
-    "bert-base-multilingual-cased",
-    "bert-base-chinese",
-    "bert-base-german-cased",
-    "bert-large-uncased-whole-word-masking",
-    "bert-large-cased-whole-word-masking",
-    "bert-large-uncased-whole-word-masking-finetuned-squad",
-    "bert-large-cased-whole-word-masking-finetuned-squad",
-    "bert-base-cased-finetuned-mrpc",
-    "bert-base-german-dbmdz-cased",
-    "bert-base-german-dbmdz-uncased",
-    "cl-tohoku/bert-base-japanese",
-    "cl-tohoku/bert-base-japanese-whole-word-masking",
-    "cl-tohoku/bert-base-japanese-char",
-    "cl-tohoku/bert-base-japanese-char-whole-word-masking",
-    "TurkuNLP/bert-base-finnish-cased-v1",
-    "TurkuNLP/bert-base-finnish-uncased-v1",
-    "wietsedv/bert-base-dutch-cased",
-    # See all BERT models at https://huggingface.co/models?filter=bert
+BERTQAT_PRETRAINED_MODEL_ARCHIVE_LIST = [
+    "NM-Bert",
+    # See all bertqat models at https://huggingface.co/models?filter=bertqat
 ]
 
 
-def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
+class QATMatMul(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # behaves like normal torch.matmul unless a SparseML QuantizationModifier
+        # is initialized
+        self.wrap_qat = True
+        self.qat_wrapper_kwargs = {
+            "num_inputs": 2,
+            "input_qconfigs": ["asymmetric", "symmetric"],
+        }
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor):
+        return torch.matmul(a, b)
+
+
+# Copied from transformers.models.bert.modeling_bert.load_tf_weights_in_bert with bert->bertqat
+def load_tf_weights_in_bertqat(model, config, tf_checkpoint_path):
     """Load tf checkpoints in a pytorch model."""
     try:
         import re
@@ -163,7 +159,8 @@ def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
     return model
 
 
-class BertEmbeddings(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertEmbeddings with Bert->Bertqat
+class BertqatEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
     def __init__(self, config):
@@ -223,7 +220,7 @@ class BertEmbeddings(nn.Module):
         return embeddings
 
 
-class BertSelfAttention(nn.Module):
+class BertqatSelfAttention(nn.Module):
     def __init__(self, config, position_embedding_type=None):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
@@ -239,6 +236,11 @@ class BertSelfAttention(nn.Module):
         self.query = nn.Linear(config.hidden_size, self.all_head_size)
         self.key = nn.Linear(config.hidden_size, self.all_head_size)
         self.value = nn.Linear(config.hidden_size, self.all_head_size)
+
+        # non-parameterized matmuls will behave as normal torch.matmul ops unless
+        # Quantization-Aware-Training is invoked
+        self.attention_scores_matmul = QATMatMul()
+        self.context_layer_matmul = QATMatMul()
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
         self.position_embedding_type = position_embedding_type or getattr(
@@ -303,7 +305,7 @@ class BertSelfAttention(nn.Module):
             past_key_value = (key_layer, value_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = self.attention_scores_matmul(query_layer, key_layer.transpose(-1, -2))
 
         if self.position_embedding_type == "relative_key" or self.position_embedding_type == "relative_key_query":
             seq_length = hidden_states.size()[1]
@@ -323,7 +325,7 @@ class BertSelfAttention(nn.Module):
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         if attention_mask is not None:
-            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            # Apply the attention mask is (precomputed for all layers in BertqatModel forward() function)
             attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
@@ -337,7 +339,7 @@ class BertSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = self.context_layer_matmul(attention_probs, value_layer)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
@@ -350,7 +352,8 @@ class BertSelfAttention(nn.Module):
         return outputs
 
 
-class BertSelfOutput(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertSelfOutput with Bert->Bertqat
+class BertqatSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -364,11 +367,12 @@ class BertSelfOutput(nn.Module):
         return hidden_states
 
 
-class BertAttention(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertAttention with Bert->Bertqat
+class BertqatAttention(nn.Module):
     def __init__(self, config, position_embedding_type=None):
         super().__init__()
-        self.self = BertSelfAttention(config, position_embedding_type=position_embedding_type)
-        self.output = BertSelfOutput(config)
+        self.self = BertqatSelfAttention(config, position_embedding_type=position_embedding_type)
+        self.output = BertqatSelfOutput(config)
         self.pruned_heads = set()
 
     def prune_heads(self, heads):
@@ -413,7 +417,8 @@ class BertAttention(nn.Module):
         return outputs
 
 
-class BertIntermediate(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertIntermediate with Bert->Bertqat
+class BertqatIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
@@ -428,7 +433,8 @@ class BertIntermediate(nn.Module):
         return hidden_states
 
 
-class BertOutput(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertOutput with Bert->Bertqat
+class BertqatOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
@@ -442,20 +448,21 @@ class BertOutput(nn.Module):
         return hidden_states
 
 
-class BertLayer(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertLayer with Bert->Bertqat
+class BertqatLayer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
-        self.attention = BertAttention(config)
+        self.attention = BertqatAttention(config)
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
             if not self.is_decoder:
                 raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
-            self.crossattention = BertAttention(config, position_embedding_type="absolute")
-        self.intermediate = BertIntermediate(config)
-        self.output = BertOutput(config)
+            self.crossattention = BertqatAttention(config, position_embedding_type="absolute")
+        self.intermediate = BertqatIntermediate(config)
+        self.output = BertqatOutput(config)
 
     def forward(
         self,
@@ -527,11 +534,12 @@ class BertLayer(nn.Module):
         return layer_output
 
 
-class BertEncoder(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertEncoder with Bert->Bertqat
+class BertqatEncoder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([BertLayer(config) for _ in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([BertqatLayer(config) for _ in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -624,7 +632,8 @@ class BertEncoder(nn.Module):
         )
 
 
-class BertPooler(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertPooler with Bert->Bertqat
+class BertqatPooler(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -639,7 +648,8 @@ class BertPooler(nn.Module):
         return pooled_output
 
 
-class BertPredictionHeadTransform(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertPredictionHeadTransform with Bert->Bertqat
+class BertqatPredictionHeadTransform(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
@@ -656,10 +666,11 @@ class BertPredictionHeadTransform(nn.Module):
         return hidden_states
 
 
-class BertLMPredictionHead(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertLMPredictionHead with Bert->Bertqat
+class BertqatLMPredictionHead(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.transform = BertPredictionHeadTransform(config)
+        self.transform = BertqatPredictionHeadTransform(config)
 
         # The output weights are the same as the input embeddings, but there is
         # an output-only bias for each token.
@@ -676,17 +687,19 @@ class BertLMPredictionHead(nn.Module):
         return hidden_states
 
 
-class BertOnlyMLMHead(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertOnlyMLMHead with Bert->Bertqat
+class BertqatOnlyMLMHead(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.predictions = BertLMPredictionHead(config)
+        self.predictions = BertqatLMPredictionHead(config)
 
     def forward(self, sequence_output):
         prediction_scores = self.predictions(sequence_output)
         return prediction_scores
 
 
-class BertOnlyNSPHead(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertOnlyNSPHead with Bert->Bertqat
+class BertqatOnlyNSPHead(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.seq_relationship = nn.Linear(config.hidden_size, 2)
@@ -696,10 +709,11 @@ class BertOnlyNSPHead(nn.Module):
         return seq_relationship_score
 
 
-class BertPreTrainingHeads(nn.Module):
+# Copied from transformers.models.bert.modeling_bert.BertPreTrainingHeads with Bert->Bertqat
+class BertqatPreTrainingHeads(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.predictions = BertLMPredictionHead(config)
+        self.predictions = BertqatLMPredictionHead(config)
         self.seq_relationship = nn.Linear(config.hidden_size, 2)
 
     def forward(self, sequence_output, pooled_output):
@@ -708,15 +722,16 @@ class BertPreTrainingHeads(nn.Module):
         return prediction_scores, seq_relationship_score
 
 
-class BertPreTrainedModel(PreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertPreTrainedModel with Bert->Bertqat,bert->bertqat
+class BertqatPreTrainedModel(PreTrainedModel):
     """
     An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
     models.
     """
 
-    config_class = BertConfig
-    load_tf_weights = load_tf_weights_in_bert
-    base_model_prefix = "bert"
+    config_class = BertqatConfig
+    load_tf_weights = load_tf_weights_in_bertqat
+    base_model_prefix = "bertqat"
     supports_gradient_checkpointing = True
     _keys_to_ignore_on_load_missing = [r"position_ids"]
 
@@ -737,14 +752,15 @@ class BertPreTrainedModel(PreTrainedModel):
             module.weight.data.fill_(1.0)
 
     def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, BertEncoder):
+        if isinstance(module, BertqatEncoder):
             module.gradient_checkpointing = value
 
 
 @dataclass
-class BertForPreTrainingOutput(ModelOutput):
+# Copied from transformers.models.bert.modeling_bert.BertForPreTrainingOutput with Bert->Bertqat
+class BertqatForPreTrainingOutput(ModelOutput):
     """
-    Output type of [`BertForPreTraining`].
+    Output type of [`BertqatForPreTraining`].
 
     Args:
         loss (*optional*, returned when `labels` is provided, `torch.FloatTensor` of shape `(1,)`):
@@ -775,7 +791,7 @@ class BertForPreTrainingOutput(ModelOutput):
     attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
-BERT_START_DOCSTRING = r"""
+BERTQAT_START_DOCSTRING = r"""
 
     This model inherits from [`PreTrainedModel`]. Check the superclass documentation for the generic methods the
     library implements for all its model (such as downloading or saving, resizing the input embeddings, pruning heads
@@ -786,12 +802,12 @@ BERT_START_DOCSTRING = r"""
     and behavior.
 
     Parameters:
-        config ([`BertConfig`]): Model configuration class with all the parameters of the model.
+        config ([`BertqatConfig`]): Model configuration class with all the parameters of the model.
             Initializing with a config file does not load the weights associated with the model, only the
             configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
-BERT_INPUTS_DOCSTRING = r"""
+BERTQAT_INPUTS_DOCSTRING = r"""
     Args:
         input_ids (`torch.LongTensor` of shape `({0})`):
             Indices of input sequence tokens in the vocabulary.
@@ -842,10 +858,11 @@ BERT_INPUTS_DOCSTRING = r"""
 
 
 @add_start_docstrings(
-    "The bare Bert Model transformer outputting raw hidden-states without any specific head on top.",
-    BERT_START_DOCSTRING,
+    "The bare Bertqat Model transformer outputting raw hidden-states without any specific head on top.",
+    BERTQAT_START_DOCSTRING,
 )
-class BertModel(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertModel with BERT->BERTQAT,Bert->Bertqat
+class BertqatModel(BertqatPreTrainedModel):
     """
 
     The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
@@ -862,10 +879,10 @@ class BertModel(BertPreTrainedModel):
         super().__init__(config)
         self.config = config
 
-        self.embeddings = BertEmbeddings(config)
-        self.encoder = BertEncoder(config)
+        self.embeddings = BertqatEmbeddings(config)
+        self.encoder = BertqatEncoder(config)
 
-        self.pooler = BertPooler(config) if add_pooling_layer else None
+        self.pooler = BertqatPooler(config) if add_pooling_layer else None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -884,7 +901,7 @@ class BertModel(BertPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1023,17 +1040,18 @@ class BertModel(BertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    Bert Model with two heads on top as done during the pretraining: a `masked language modeling` head and a `next
+    Bertqat Model with two heads on top as done during the pretraining: a `masked language modeling` head and a `next
     sentence prediction (classification)` head.
     """,
-    BERT_START_DOCSTRING,
+    BERTQAT_START_DOCSTRING,
 )
-class BertForPreTraining(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForPreTraining with BERT->BERTQAT,Bert->Bertqat,bert->bertqat,bert-base-uncased->NM-Bert
+class BertqatForPreTraining(BertqatPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.bert = BertModel(config)
-        self.cls = BertPreTrainingHeads(config)
+        self.bertqat = BertqatModel(config)
+        self.cls = BertqatPreTrainingHeads(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1044,8 +1062,8 @@ class BertForPreTraining(BertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.cls.predictions.decoder = new_embeddings
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
-    @replace_return_docstrings(output_type=BertForPreTrainingOutput, config_class=_CONFIG_FOR_DOC)
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @replace_return_docstrings(output_type=BertqatForPreTrainingOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
         input_ids=None,
@@ -1079,11 +1097,11 @@ class BertForPreTraining(BertPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import BertTokenizer, BertForPreTraining
+        >>> from transformers import BertqatTokenizer, BertqatForPreTraining
         >>> import torch
 
-        >>> tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        >>> model = BertForPreTraining.from_pretrained("bert-base-uncased")
+        >>> tokenizer = BertqatTokenizer.from_pretrained("bertqat-base-uncased")
+        >>> model = BertqatForPreTraining.from_pretrained("bertqat-base-uncased")
 
         >>> inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
         >>> outputs = model(**inputs)
@@ -1094,7 +1112,7 @@ class BertForPreTraining(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1120,7 +1138,7 @@ class BertForPreTraining(BertPreTrainedModel):
             output = (prediction_scores, seq_relationship_score) + outputs[2:]
             return ((total_loss,) + output) if total_loss is not None else output
 
-        return BertForPreTrainingOutput(
+        return BertqatForPreTrainingOutput(
             loss=total_loss,
             prediction_logits=prediction_scores,
             seq_relationship_logits=seq_relationship_score,
@@ -1130,9 +1148,10 @@ class BertForPreTraining(BertPreTrainedModel):
 
 
 @add_start_docstrings(
-    """Bert Model with a `language modeling` head on top for CLM fine-tuning.""", BERT_START_DOCSTRING
+    """Bertqat Model with a `language modeling` head on top for CLM fine-tuning.""", BERTQAT_START_DOCSTRING
 )
-class BertLMHeadModel(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertLMHeadModel with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatLMHeadModel(BertqatPreTrainedModel):
 
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
@@ -1141,10 +1160,10 @@ class BertLMHeadModel(BertPreTrainedModel):
         super().__init__(config)
 
         if not config.is_decoder:
-            logger.warning("If you want to use `BertLMHeadModel` as a standalone, add `is_decoder=True.`")
+            logger.warning("If you want to use `BertqatLMHeadModel` as a standalone, add `is_decoder=True.`")
 
-        self.bert = BertModel(config, add_pooling_layer=False)
-        self.cls = BertOnlyMLMHead(config)
+        self.bertqat = BertqatModel(config, add_pooling_layer=False)
+        self.cls = BertqatOnlyMLMHead(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1155,7 +1174,7 @@ class BertLMHeadModel(BertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.cls.predictions.decoder = new_embeddings
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @replace_return_docstrings(output_type=CausalLMOutputWithCrossAttentions, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -1205,13 +1224,13 @@ class BertLMHeadModel(BertPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import BertTokenizer, BertLMHeadModel, BertConfig
+        >>> from transformers import BertqatTokenizer, BertqatLMHeadModel, BertqatConfig
         >>> import torch
 
-        >>> tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
-        >>> config = BertConfig.from_pretrained("bert-base-cased")
+        >>> tokenizer = BertqatTokenizer.from_pretrained("bertqat-base-cased")
+        >>> config = BertqatConfig.from_pretrained("bertqat-base-cased")
         >>> config.is_decoder = True
-        >>> model = BertLMHeadModel.from_pretrained("bert-base-cased", config=config)
+        >>> model = BertqatLMHeadModel.from_pretrained("bertqat-base-cased", config=config)
 
         >>> inputs = tokenizer("Hello, my dog is cute", return_tensors="pt")
         >>> outputs = model(**inputs)
@@ -1223,7 +1242,7 @@ class BertLMHeadModel(BertPreTrainedModel):
         if labels is not None:
             use_cache = False
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1282,8 +1301,9 @@ class BertLMHeadModel(BertPreTrainedModel):
         return reordered_past
 
 
-@add_start_docstrings("""Bert Model with a `language modeling` head on top.""", BERT_START_DOCSTRING)
-class BertForMaskedLM(BertPreTrainedModel):
+@add_start_docstrings("""Bertqat Model with a `language modeling` head on top.""", BERTQAT_START_DOCSTRING)
+# Copied from transformers.models.bert.modeling_bert.BertForMaskedLM with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatForMaskedLM(BertqatPreTrainedModel):
 
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
@@ -1293,12 +1313,12 @@ class BertForMaskedLM(BertPreTrainedModel):
 
         if config.is_decoder:
             logger.warning(
-                "If you want to use `BertForMaskedLM` make sure `config.is_decoder=False` for "
+                "If you want to use `BertqatForMaskedLM` make sure `config.is_decoder=False` for "
                 "bi-directional self-attention."
             )
 
-        self.bert = BertModel(config, add_pooling_layer=False)
-        self.cls = BertOnlyMLMHead(config)
+        self.bertqat = BertqatModel(config, add_pooling_layer=False)
+        self.cls = BertqatOnlyMLMHead(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1309,7 +1329,7 @@ class BertForMaskedLM(BertPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.cls.predictions.decoder = new_embeddings
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1340,7 +1360,7 @@ class BertForMaskedLM(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1391,20 +1411,21 @@ class BertForMaskedLM(BertPreTrainedModel):
 
 
 @add_start_docstrings(
-    """Bert Model with a `next sentence prediction (classification)` head on top.""",
-    BERT_START_DOCSTRING,
+    """Bertqat Model with a `next sentence prediction (classification)` head on top.""",
+    BERTQAT_START_DOCSTRING,
 )
-class BertForNextSentencePrediction(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForNextSentencePrediction with BERT->BERTQAT,Bert->Bertqat,bert->bertqat,bert-base-uncased->NM-Bert
+class BertqatForNextSentencePrediction(BertqatPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.bert = BertModel(config)
-        self.cls = BertOnlyNSPHead(config)
+        self.bertqat = BertqatModel(config)
+        self.cls = BertqatOnlyNSPHead(config)
 
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @replace_return_docstrings(output_type=NextSentencePredictorOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
@@ -1433,11 +1454,11 @@ class BertForNextSentencePrediction(BertPreTrainedModel):
         Example:
 
         ```python
-        >>> from transformers import BertTokenizer, BertForNextSentencePrediction
+        >>> from transformers import BertqatTokenizer, BertqatForNextSentencePrediction
         >>> import torch
 
-        >>> tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-        >>> model = BertForNextSentencePrediction.from_pretrained("bert-base-uncased")
+        >>> tokenizer = BertqatTokenizer.from_pretrained("bertqat-base-uncased")
+        >>> model = BertqatForNextSentencePrediction.from_pretrained("bertqat-base-uncased")
 
         >>> prompt = "In Italy, pizza served in formal settings, such as at a restaurant, is presented unsliced."
         >>> next_sentence = "The sky is blue due to the shorter wavelength of blue light."
@@ -1458,7 +1479,7 @@ class BertForNextSentencePrediction(BertPreTrainedModel):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1493,18 +1514,19 @@ class BertForNextSentencePrediction(BertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    Bert Model transformer with a sequence classification/regression head on top (a linear layer on top of the pooled
-    output) e.g. for GLUE tasks.
+    Bertqat Model transformer with a sequence classification/regression head on top (a linear layer on top of the
+    pooled output) e.g. for GLUE tasks.
     """,
-    BERT_START_DOCSTRING,
+    BERTQAT_START_DOCSTRING,
 )
-class BertForSequenceClassification(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForSequenceClassification with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatForSequenceClassification(BertqatPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.config = config
 
-        self.bert = BertModel(config)
+        self.bertqat = BertqatModel(config)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
@@ -1514,7 +1536,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1542,7 +1564,7 @@ class BertForSequenceClassification(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1595,16 +1617,17 @@ class BertForSequenceClassification(BertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    Bert Model with a multiple choice classification head on top (a linear layer on top of the pooled output and a
+    Bertqat Model with a multiple choice classification head on top (a linear layer on top of the pooled output and a
     softmax) e.g. for RocStories/SWAG tasks.
     """,
-    BERT_START_DOCSTRING,
+    BERTQAT_START_DOCSTRING,
 )
-class BertForMultipleChoice(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForMultipleChoice with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatForMultipleChoice(BertqatPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
-        self.bert = BertModel(config)
+        self.bertqat = BertqatModel(config)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
@@ -1614,7 +1637,7 @@ class BertForMultipleChoice(BertPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1653,7 +1676,7 @@ class BertForMultipleChoice(BertPreTrainedModel):
             else None
         )
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1690,12 +1713,13 @@ class BertForMultipleChoice(BertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    Bert Model with a token classification head on top (a linear layer on top of the hidden-states output) e.g. for
+    Bertqat Model with a token classification head on top (a linear layer on top of the hidden-states output) e.g. for
     Named-Entity-Recognition (NER) tasks.
     """,
-    BERT_START_DOCSTRING,
+    BERTQAT_START_DOCSTRING,
 )
-class BertForTokenClassification(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForTokenClassification with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatForTokenClassification(BertqatPreTrainedModel):
 
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
@@ -1703,7 +1727,7 @@ class BertForTokenClassification(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
 
-        self.bert = BertModel(config, add_pooling_layer=False)
+        self.bertqat = BertqatModel(config, add_pooling_layer=False)
         classifier_dropout = (
             config.classifier_dropout if config.classifier_dropout is not None else config.hidden_dropout_prob
         )
@@ -1713,7 +1737,7 @@ class BertForTokenClassification(BertPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1739,7 +1763,7 @@ class BertForTokenClassification(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
@@ -1775,12 +1799,13 @@ class BertForTokenClassification(BertPreTrainedModel):
 
 @add_start_docstrings(
     """
-    Bert Model with a span classification head on top for extractive question-answering tasks like SQuAD (a linear
+    Bertqat Model with a span classification head on top for extractive question-answering tasks like SQuAD (a linear
     layers on top of the hidden-states output to compute `span start logits` and `span end logits`).
     """,
-    BERT_START_DOCSTRING,
+    BERTQAT_START_DOCSTRING,
 )
-class BertForQuestionAnswering(BertPreTrainedModel):
+# Copied from transformers.models.bert.modeling_bert.BertForQuestionAnswering with BERT->BERTQAT,Bert->Bertqat,bert->bertqat
+class BertqatForQuestionAnswering(BertqatPreTrainedModel):
 
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
@@ -1788,13 +1813,13 @@ class BertForQuestionAnswering(BertPreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
 
-        self.bert = BertModel(config, add_pooling_layer=False)
+        self.bertqat = BertqatModel(config, add_pooling_layer=False)
         self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
 
         # Initialize weights and apply final processing
         self.post_init()
 
-    @add_start_docstrings_to_model_forward(BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
+    @add_start_docstrings_to_model_forward(BERTQAT_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
         processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
@@ -1827,7 +1852,7 @@ class BertForQuestionAnswering(BertPreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        outputs = self.bert(
+        outputs = self.bertqat(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
