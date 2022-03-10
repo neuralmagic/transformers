@@ -747,7 +747,7 @@ class TrainingArguments:
         default="",
         metadata={"help": "Used by the SageMaker launcher to send mp-specific args. Ignored in Trainer"},
     )
-    sparse_log_frequency: float = field(
+    modifier_log_frequency: float = field(
         default = 0.1,
         metadata={
             "help": (
