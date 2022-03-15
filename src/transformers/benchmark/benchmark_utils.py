@@ -23,6 +23,7 @@ import linecache
 import os
 import platform
 import sys
+import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict, namedtuple
 from datetime import datetime
@@ -617,6 +618,13 @@ class Benchmark(ABC):
         else:
             self.config_dict = {model_name: config for model_name, config in zip(self.args.model_names, configs)}
 
+        warnings.warn(
+            f"The class {self.__class__} is deprecated. Hugging Face Benchmarking utils"
+            " are deprecated in general and it is advised to use external Benchmarking libraries "
+            " to benchmark Transformer models.",
+            FutureWarning,
+        )
+
         if self.args.memory and os.getenv("TRANSFORMERS_USE_MULTIPROCESSING") == 0:
             logger.warning(
                 "Memory consumption will not be measured accurately if `args.multi_process` is set to `False.` The flag 'TRANSFORMERS_USE_MULTIPROCESSING' should only be disabled for debugging / testing."
@@ -801,7 +809,7 @@ class Benchmark(ABC):
                 info["cpu_ram_mb"] = bytes_to_mega_bytes(psutil.virtual_memory().total)
             else:
                 logger.warning(
-                    "Psutil not installed, we won't log available CPU memory."
+                    "Psutil not installed, we won't log available CPU memory. "
                     "Install psutil (pip install psutil) to log available CPU memory."
                 )
                 info["cpu_ram_mb"] = "N/A"

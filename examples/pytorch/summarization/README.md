@@ -29,6 +29,7 @@ For the old `finetune_trainer.py` and related utils, see [`examples/legacy/seq2s
 - `MarianMTModel`
 - `PegasusForConditionalGeneration`
 - `T5ForConditionalGeneration`
+- `MT5ForConditionalGeneration`
 
 `run_summarization.py` is a lightweight example of how to download and preprocess a dataset from the [🤗 Datasets](https://github.com/huggingface/datasets) library or use your own files (jsonlines or csv), then fine-tune one of the architectures above on it.
 
@@ -174,11 +175,9 @@ and reply to the questions asked. Then
 accelerate test
 ```
 
-that will check everything is ready for training. Finally, you cna launch training with
+that will check everything is ready for training. Finally, you can launch training with
 
 ```bash
-export TASK_NAME=mrpc
-
 accelerate launch run_summarization_no_trainer.py \
     --model_name_or_path t5-small \
     --dataset_name cnn_dailymail \

@@ -23,11 +23,11 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+import datasets
 import numpy as np
 from datasets import load_dataset, load_metric
 
 import transformers
-from sparseml_utils import GLUEModuleExporter, SparseMLGLUETrainer
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
@@ -36,17 +36,20 @@ from transformers import (
     EvalPrediction,
     HfArgumentParser,
     PretrainedConfig,
+    Trainer,
     TrainingArguments,
     default_data_collator,
     set_seed,
 )
-from transformers.sparse import export_model, load_recipe, preprocess_state_dict
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.7.0.dev0")
+check_min_version("4.18.0.dev0")
+
+require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -73,25 +76,6 @@ class DataTrainingArguments:
     the command line.
     """
 
-    recipe: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
-            "for more information"
-        },
-    )
-    recipe_args: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Recipe arguments to be overwritten"
-        },
-    )
-    onnx_export_path: Optional[str] = field(
-        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
-    )
-    num_exported_samples: Optional[int] = field(
-        default=20, metadata={"help": "Number of exported samples, default to 20"}
-    )
     task_name: Optional[str] = field(
         default=None,
         metadata={"help": "The name of the task to train on: " + ", ".join(task_to_keys.keys())},
@@ -111,10 +95,6 @@ class DataTrainingArguments:
     )
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
-    )
-    preprocessing_num_workers: Optional[int] = field(
-        default=None,
-        metadata={"help": "The number of processes to use for the preprocessing."},
     )
     pad_to_max_length: bool = field(
         default=True,
@@ -179,9 +159,6 @@ class ModelArguments:
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
-    distill_teacher: Optional[str] = field(
-        default=None, metadata={"help": "Teacher model which needs to be a trained text classification model"}
-    )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
     )
@@ -222,6 +199,27 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    # Log on each process the small summary:
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
+
     # Detecting last checkpoint.
     last_checkpoint = None
     if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
@@ -236,26 +234,6 @@ def main():
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
-
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    logger.setLevel(logging.INFO if training_args.should_log else logging.WARN)
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
-    )
-    # Set the verbosity to info of the Transformers logger (on main process only):
-    if training_args.should_log:
-        transformers.utils.logging.set_verbosity_info()
-        transformers.utils.logging.enable_default_handler()
-        transformers.utils.logging.enable_explicit_format()
-    logger.info(f"Training/evaluation parameters {training_args}")
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
@@ -274,10 +252,12 @@ def main():
     # download the dataset.
     if data_args.task_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset("glue", data_args.task_name, cache_dir=model_args.cache_dir)
+        raw_datasets = load_dataset("glue", data_args.task_name, cache_dir=model_args.cache_dir)
     elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir)
+        raw_datasets = load_dataset(
+            data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
+        )
     else:
         # Loading a dataset from your local files.
         # CSV/JSON training and evaluation files are needed.
@@ -301,10 +281,10 @@ def main():
 
         if data_args.train_file.endswith(".csv"):
             # Loading a dataset from local csv files
-            datasets = load_dataset("csv", data_files=data_files, cache_dir=model_args.cache_dir)
+            raw_datasets = load_dataset("csv", data_files=data_files, cache_dir=model_args.cache_dir)
         else:
             # Loading a dataset from local json files
-            datasets = load_dataset("json", data_files=data_files, cache_dir=model_args.cache_dir)
+            raw_datasets = load_dataset("json", data_files=data_files, cache_dir=model_args.cache_dir)
     # See more about loading any type of standard or custom dataset at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -312,19 +292,19 @@ def main():
     if data_args.task_name is not None:
         is_regression = data_args.task_name == "stsb"
         if not is_regression:
-            label_list = datasets["train"].features["label"].names
+            label_list = raw_datasets["train"].features["label"].names
             num_labels = len(label_list)
         else:
             num_labels = 1
     else:
         # Trying to have good defaults here, don't hesitate to tweak to your needs.
-        is_regression = datasets["train"].features["label"].dtype in ["float32", "float64"]
+        is_regression = raw_datasets["train"].features["label"].dtype in ["float32", "float64"]
         if is_regression:
             num_labels = 1
         else:
             # A useful fast method:
             # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.unique
-            label_list = datasets["train"].unique("label")
+            label_list = raw_datasets["train"].unique("label")
             label_list.sort()  # Let's sort it for determinism
             num_labels = len(label_list)
 
@@ -332,12 +312,6 @@ def main():
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-
-    # Load and preprocess the state dict if the model existed (in this case we continue to train or
-    # evaluate the model). The preprocessing step is to restore names of parameters changed by
-    # QAT process
-    state_dict = preprocess_state_dict(model_args.model_name_or_path)
-
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         num_labels=num_labels,
@@ -360,25 +334,14 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
-        state_dict=state_dict,
     )
 
-    teacher_model = None
-    if model_args.distill_teacher is not None:
-        teacher_model = AutoModelForSequenceClassification.from_pretrained(
-            model_args.distill_teacher,
-            from_tf=bool(".ckpt" in model_args.distill_teacher),
-            cache_dir=model_args.cache_dir,
-        )
-        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
-        params = sum([np.prod(p.size()) for p in teacher_model_parameters])
-        logger.info("Teacher Model has %s parameters", params)
-    # Preprocessing the datasets
+    # Preprocessing the raw_datasets
     if data_args.task_name is not None:
         sentence1_key, sentence2_key = task_to_keys[data_args.task_name]
     else:
         # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
-        non_label_column_names = [name for name in datasets["train"].column_names if name != "label"]
+        non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
         if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
             sentence1_key, sentence2_key = "sentence1", "sentence2"
         else:
@@ -414,6 +377,13 @@ def main():
     elif data_args.task_name is None and not is_regression:
         label_to_id = {v: i for i, v in enumerate(label_list)}
 
+    if label_to_id is not None:
+        model.config.label2id = label_to_id
+        model.config.id2label = {id: label for label, id in config.label2id.items()}
+    elif data_args.task_name is not None and not is_regression:
+        model.config.label2id = {l: i for i, l in enumerate(label_list)}
+        model.config.id2label = {id: label for label, id in config.label2id.items()}
+
     if data_args.max_seq_length > tokenizer.model_max_length:
         logger.warning(
             f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
@@ -433,30 +403,31 @@ def main():
             result["label"] = [(label_to_id[l] if l != -1 else -1) for l in examples["label"]]
         return result
 
-    datasets = datasets.map(
-        preprocess_function,
-        batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        load_from_cache_file=not data_args.overwrite_cache,
-    )
+    with training_args.main_process_first(desc="dataset map pre-processing"):
+        raw_datasets = raw_datasets.map(
+            preprocess_function,
+            batched=True,
+            load_from_cache_file=not data_args.overwrite_cache,
+            desc="Running tokenizer on dataset",
+        )
     if training_args.do_train:
-        if "train" not in datasets:
+        if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = datasets["train"]
+        train_dataset = raw_datasets["train"]
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
 
     if training_args.do_eval:
-        if "validation" not in datasets and "validation_matched" not in datasets:
+        if "validation" not in raw_datasets and "validation_matched" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
+        eval_dataset = raw_datasets["validation_matched" if data_args.task_name == "mnli" else "validation"]
         if data_args.max_eval_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
 
     if training_args.do_predict or data_args.task_name is not None or data_args.test_file is not None:
-        if "test" not in datasets and "test_matched" not in datasets:
+        if "test" not in raw_datasets and "test_matched" not in raw_datasets:
             raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = datasets["test_matched" if data_args.task_name == "mnli" else "test"]
+        predict_dataset = raw_datasets["test_matched" if data_args.task_name == "mnli" else "test"]
         if data_args.max_predict_samples is not None:
             predict_dataset = predict_dataset.select(range(data_args.max_predict_samples))
 
@@ -486,7 +457,8 @@ def main():
         else:
             return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}
 
-    # Data collator will default to DataCollatorWithPadding, so we change it if we already did the padding.
+    # Data collator will default to DataCollatorWithPadding when the tokenizer is passed to Trainer, so we change it if
+    # we already did the padding.
     if data_args.pad_to_max_length:
         data_collator = default_data_collator
     elif training_args.fp16:
@@ -494,28 +466,16 @@ def main():
     else:
         data_collator = None
 
-    # Load possible existing recipe and new one passed in through command argument
-    existing_recipe = load_recipe(model_args.model_name_or_path)
-    new_recipe = data_args.recipe
-
     # Initialize our Trainer
-    trainer = SparseMLGLUETrainer(
-        model_args.model_name_or_path,
-        [existing_recipe, new_recipe],
-        teacher=teacher_model,
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
+        compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        recipe_args=data_args.recipe_args
     )
-    # Apply recipes to the model. This is necessary given that
-    # sparsification methods such as QAT modified the model graph with their own learnable
-    # parameters. They are also restored/loaded to the model.
-    trainer.apply_recipes()
 
     # Training
     if training_args.do_train:
@@ -546,7 +506,7 @@ def main():
         eval_datasets = [eval_dataset]
         if data_args.task_name == "mnli":
             tasks.append("mnli-mm")
-            eval_datasets.append(datasets["validation_mismatched"])
+            eval_datasets.append(raw_datasets["validation_mismatched"])
 
         for eval_dataset, task in zip(eval_datasets, tasks):
             metrics = trainer.evaluate(eval_dataset=eval_dataset)
@@ -567,11 +527,11 @@ def main():
         predict_datasets = [predict_dataset]
         if data_args.task_name == "mnli":
             tasks.append("mnli-mm")
-            predict_datasets.append(datasets["test_mismatched"])
+            predict_datasets.append(raw_datasets["test_mismatched"])
 
         for predict_dataset, task in zip(predict_datasets, tasks):
             # Removing the `label` columns because it contains -1 and Trainer won't like that.
-            predict_dataset.remove_columns_("label")
+            predict_dataset = predict_dataset.remove_columns("label")
             predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
             predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
 
@@ -587,21 +547,17 @@ def main():
                             item = label_list[item]
                             writer.write(f"{index}\t{item}\n")
 
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-classification"}
+    if data_args.task_name is not None:
+        kwargs["language"] = "en"
+        kwargs["dataset_tags"] = "glue"
+        kwargs["dataset_args"] = data_args.task_name
+        kwargs["dataset"] = f"GLUE {data_args.task_name.upper()}"
+
     if training_args.push_to_hub:
-        kwargs = {"finetuned_from": model_args.model_name_or_path, "tags": "text-classification"}
-        if data_args.task_name is not None:
-            kwargs["language"] = "en"
-            kwargs["dataset_tags"] = "glue"
-            kwargs["dataset_args"] = data_args.task_name
-            kwargs["dataset"] = f"GLUE {data_args.task_name.upper()}"
-
         trainer.push_to_hub(**kwargs)
-
-    if data_args.onnx_export_path:
-        logger.info("*** Export to ONNX ***")
-        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
-        exporter = GLUEModuleExporter(model, output_dir=data_args.onnx_export_path)
-        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+    else:
+        trainer.create_model_card(**kwargs)
 
 
 def _mp_fn(index):

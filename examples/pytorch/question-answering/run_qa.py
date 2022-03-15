@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Fine-tuning the library models for question answering.
+Fine-tuning the library models for question answering using a slightly adapted version of the 🤗 Trainer.
 """
 # You can also adapt this script on your own question answering task. Pointers for this are left as comments.
 
@@ -24,11 +24,11 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
-import numpy
+import datasets
 from datasets import load_dataset, load_metric
 
 import transformers
-from sparseml_utils import QuestionAnsweringModuleExporter, SparseMLQATrainer
+from trainer_qa import QuestionAnsweringTrainer
 from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
@@ -41,14 +41,16 @@ from transformers import (
     default_data_collator,
     set_seed,
 )
-from transformers.sparse import export_model, load_recipe, preprocess_state_dict
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.utils.versions import require_version
 from utils_qa import postprocess_qa_predictions
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.7.0.dev0")
+check_min_version("4.18.0.dev0")
+
+require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/question-answering/requirements.txt")
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +63,6 @@ class ModelArguments:
 
     model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
-    )
-    distill_teacher: Optional[str] = field(
-        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -94,25 +93,6 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    recipe: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
-            "for more information"
-        },
-    )
-    recipe_args: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Recipe arguments to be overwritten"
-        },
-    )
-    onnx_export_path: Optional[str] = field(
-        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
-    )
-    num_exported_samples: Optional[int] = field(
-        default=20, metadata={"help": "Number of exported samples, default to 20"}
-    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -217,6 +197,7 @@ class DataTrainingArguments:
                 extension = self.test_file.split(".")[-1]
                 assert extension in ["csv", "json"], "`test_file` should be a csv or a json file."
 
+
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
@@ -229,6 +210,27 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    # Log on each process the small summary:
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -245,26 +247,6 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    logger.setLevel(logging.INFO if training_args.should_log else logging.WARN)
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
-    )
-    # Set the verbosity to info of the Transformers logger (on main process only):
-    if training_args.should_log:
-        transformers.utils.logging.set_verbosity_info()
-        transformers.utils.logging.enable_default_handler()
-        transformers.utils.logging.enable_explicit_format()
-    logger.info(f"Training/evaluation parameters {training_args}")
-
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -279,7 +261,9 @@ def main():
     # download the dataset.
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir)
+        raw_datasets = load_dataset(
+            data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
+        )
     else:
         data_files = {}
         if data_args.train_file is not None:
@@ -292,7 +276,7 @@ def main():
         if data_args.test_file is not None:
             data_files["test"] = data_args.test_file
             extension = data_args.test_file.split(".")[-1]
-        datasets = load_dataset(extension, data_files=data_files, field="data", cache_dir=model_args.cache_dir)
+        raw_datasets = load_dataset(extension, data_files=data_files, field="data", cache_dir=model_args.cache_dir)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -314,12 +298,6 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-
-    # Load and preprocess the state dict if the model existed (in this case we continue to train or
-    # evaluate the model). The preprocessing step is to restore names of parameters changed by
-    # QAT process.
-    state_dict = preprocess_state_dict(model_args.model_name_or_path)
-
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -327,19 +305,7 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
-        state_dict=state_dict,
     )
-
-    teacher_model = None
-    if model_args.distill_teacher is not None:
-        teacher_model = AutoModelForQuestionAnswering.from_pretrained(
-            model_args.distill_teacher,
-            from_tf=bool(".ckpt" in model_args.distill_teacher),
-            cache_dir=model_args.cache_dir,
-        )
-        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
-        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
-        logger.info("Teacher Model has %s parameters", params)
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -352,11 +318,11 @@ def main():
     # Preprocessing the datasets.
     # Preprocessing is slighlty different for training and evaluation.
     if training_args.do_train:
-        column_names = datasets["train"].column_names
+        column_names = raw_datasets["train"].column_names
     elif training_args.do_eval:
-        column_names = datasets["validation"].column_names
+        column_names = raw_datasets["validation"].column_names
     else:
-        column_names = datasets["test"].column_names
+        column_names = raw_datasets["test"].column_names
     question_column_name = "question" if "question" in column_names else column_names[0]
     context_column_name = "context" if "context" in column_names else column_names[1]
     answer_column_name = "answers" if "answers" in column_names else column_names[2]
@@ -373,6 +339,11 @@ def main():
 
     # Training preprocessing
     def prepare_train_features(examples):
+        # Some of the questions have lots of whitespace on the left, which is not useful and will make the
+        # truncation of the context fail (the tokenized question will take a lots of space). So we remove that
+        # left whitespace
+        examples[question_column_name] = [q.lstrip() for q in examples[question_column_name]]
+
         # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
         # in one example possible giving several features when a context is long, each of those features having a
         # context that overlaps a bit the context of the previous feature.
@@ -445,26 +416,33 @@ def main():
         return tokenized_examples
 
     if training_args.do_train:
-        if "train" not in datasets:
+        if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = datasets["train"]
+        train_dataset = raw_datasets["train"]
         if data_args.max_train_samples is not None:
-            # We will select sample from whole data if agument is specified
+            # We will select sample from whole data if argument is specified
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
         # Create train feature from dataset
-        train_dataset = train_dataset.map(
-            prepare_train_features,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        with training_args.main_process_first(desc="train dataset map pre-processing"):
+            train_dataset = train_dataset.map(
+                prepare_train_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on train dataset",
+            )
         if data_args.max_train_samples is not None:
             # Number of samples might increase during Feature Creation, We select only specified max samples
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
 
     # Validation preprocessing
     def prepare_validation_features(examples):
+        # Some of the questions have lots of whitespace on the left, which is not useful and will make the
+        # truncation of the context fail (the tokenized question will take a lots of space). So we remove that
+        # left whitespace
+        examples[question_column_name] = [q.lstrip() for q in examples[question_column_name]]
+
         # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
         # in one example possible giving several features when a context is long, each of those features having a
         # context that overlaps a bit the context of the previous feature.
@@ -506,39 +484,43 @@ def main():
         return tokenized_examples
 
     if training_args.do_eval:
-        if "validation" not in datasets:
+        if "validation" not in raw_datasets:
             raise ValueError("--do_eval requires a validation dataset")
-        eval_examples = datasets["validation"]
+        eval_examples = raw_datasets["validation"]
         if data_args.max_eval_samples is not None:
             # We will select sample from whole data
             eval_examples = eval_examples.select(range(data_args.max_eval_samples))
         # Validation Feature Creation
-        eval_dataset = eval_examples.map(
-            prepare_validation_features,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        with training_args.main_process_first(desc="validation dataset map pre-processing"):
+            eval_dataset = eval_examples.map(
+                prepare_validation_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on validation dataset",
+            )
         if data_args.max_eval_samples is not None:
             # During Feature creation dataset samples might increase, we will select required samples again
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
 
     if training_args.do_predict:
-        if "test" not in datasets:
+        if "test" not in raw_datasets:
             raise ValueError("--do_predict requires a test dataset")
-        predict_examples = datasets["test"]
+        predict_examples = raw_datasets["test"]
         if data_args.max_predict_samples is not None:
             # We will select sample from whole data
             predict_examples = predict_examples.select(range(data_args.max_predict_samples))
         # Predict Feature Creation
-        predict_dataset = predict_examples.map(
-            prepare_validation_features,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        with training_args.main_process_first(desc="prediction dataset map pre-processing"):
+            predict_dataset = predict_examples.map(
+                prepare_validation_features,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on prediction dataset",
+            )
         if data_args.max_predict_samples is not None:
             # During Feature creation dataset samples might increase, we will select required samples again
             predict_dataset = predict_dataset.select(range(data_args.max_predict_samples))
@@ -564,7 +546,7 @@ def main():
             max_answer_length=data_args.max_answer_length,
             null_score_diff_threshold=data_args.null_score_diff_threshold,
             output_dir=training_args.output_dir,
-            is_world_process_zero=trainer.is_world_process_zero(),
+            log_level=log_level,
             prefix=stage,
         )
         # Format the result to the format the metric expects.
@@ -583,15 +565,8 @@ def main():
     def compute_metrics(p: EvalPrediction):
         return metric.compute(predictions=p.predictions, references=p.label_ids)
 
-    # Load possible existing recipe and new one passed in through command argument
-    existing_recipe = load_recipe(model_args.model_name_or_path)
-    new_recipe = data_args.recipe
-
     # Initialize our Trainer
-    trainer = SparseMLQATrainer(
-        model_args.model_name_or_path,
-        [existing_recipe, new_recipe],
-        teacher=teacher_model,
+    trainer = QuestionAnsweringTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
@@ -601,13 +576,7 @@ def main():
         data_collator=data_collator,
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
-        recipe_args=data_args.recipe_args
     )
-
-    # Apply recipes to the model. This is necessary given that
-    # sparsification methods such as QAT modified the model graph with their own learnable
-    # parameters. They are also restored/loaded to the model.
-    trainer.apply_recipes()
 
     # Training
     if training_args.do_train:
@@ -654,23 +623,19 @@ def main():
         trainer.log_metrics("predict", metrics)
         trainer.save_metrics("predict", metrics)
 
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "question-answering"}
+    if data_args.dataset_name is not None:
+        kwargs["dataset_tags"] = data_args.dataset_name
+        if data_args.dataset_config_name is not None:
+            kwargs["dataset_args"] = data_args.dataset_config_name
+            kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
+        else:
+            kwargs["dataset"] = data_args.dataset_name
+
     if training_args.push_to_hub:
-        kwargs = {"finetuned_from": model_args.model_name_or_path, "tags": "question-answering"}
-        if data_args.dataset_name is not None:
-            kwargs["dataset_tags"] = data_args.dataset_name
-            if data_args.dataset_config_name is not None:
-                kwargs["dataset_args"] = data_args.dataset_config_name
-                kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
-            else:
-                kwargs["dataset"] = data_args.dataset_name
-
         trainer.push_to_hub(**kwargs)
-
-    if data_args.onnx_export_path:
-        logger.info("*** Export to ONNX ***")
-        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
-        exporter = QuestionAnsweringModuleExporter(model, output_dir=data_args.onnx_export_path)
-        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+    else:
+        trainer.create_model_card(**kwargs)
 
 
 def _mp_fn(index):

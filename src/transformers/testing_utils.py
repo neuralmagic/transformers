@@ -25,28 +25,45 @@ from distutils.util import strtobool
 from io import StringIO
 from pathlib import Path
 from typing import Iterator, Union
+from unittest import mock
 
+from transformers import logging as transformers_logging
+
+from .deepspeed import is_deepspeed_available
 from .file_utils import (
-    is_datasets_available,
+    is_detectron2_available,
     is_faiss_available,
     is_flax_available,
+    is_ftfy_available,
+    is_librosa_available,
     is_onnx_available,
     is_pandas_available,
+    is_phonemizer_available,
+    is_pyctcdecode_available,
+    is_pytesseract_available,
+    is_pytorch_quantization_available,
+    is_rjieba_available,
     is_scatter_available,
     is_sentencepiece_available,
     is_soundfile_availble,
+    is_spacy_available,
+    is_tensorflow_probability_available,
+    is_tf2onnx_available,
     is_tf_available,
+    is_timm_available,
     is_tokenizers_available,
     is_torch_available,
+    is_torch_bf16_available,
+    is_torch_tf32_available,
     is_torch_tpu_available,
     is_torchaudio_available,
     is_vision_available,
 )
-from .integrations import is_optuna_available, is_ray_available
+from .integrations import is_optuna_available, is_ray_available, is_sigopt_available, is_wandb_available
 
 
 SMALL_MODEL_IDENTIFIER = "julien-c/bert-xsmall-dummy"
-DUMMY_UNKWOWN_IDENTIFIER = "julien-c/dummy-unknown"
+DUMMY_UNKNOWN_IDENTIFIER = "julien-c/dummy-unknown"
 DUMMY_DIFF_TOKENIZER_IDENTIFIER = "julien-c/dummy-diff-tokenizer"
 # Used to test Auto{Config, Model, Tokenizer} model_type detection.
 
@@ -219,9 +236,39 @@ def require_git_lfs(test_case):
         return test_case
 
 
+def require_rjieba(test_case):
+    """
+    Decorator marking a test that requires rjieba. These tests are skipped when rjieba isn't installed.
+    """
+    if not is_rjieba_available():
+        return unittest.skip("test requires rjieba")(test_case)
+    else:
+        return test_case
+
+
+def require_tf2onnx(test_case):
+    if not is_tf2onnx_available():
+        return unittest.skip("test requires tf2onnx")(test_case)
+    else:
+        return test_case
+
+
 def require_onnx(test_case):
     if not is_onnx_available():
         return unittest.skip("test requires ONNX")(test_case)
+    else:
+        return test_case
+
+
+def require_timm(test_case):
+    """
+    Decorator marking a test that requires Timm.
+
+    These tests are skipped when Timm isn't installed.
+
+    """
+    if not is_timm_available():
+        return unittest.skip("test requires Timm")(test_case)
     else:
         return test_case
 
@@ -248,6 +295,19 @@ def require_torch_scatter(test_case):
     """
     if not is_scatter_available():
         return unittest.skip("test requires PyTorch scatter")(test_case)
+    else:
+        return test_case
+
+
+def require_tensorflow_probability(test_case):
+    """
+    Decorator marking a test that requires TensorFlow probability.
+
+    These tests are skipped when TensorFlow probability isn't installed.
+
+    """
+    if not is_tensorflow_probability_available():
+        return unittest.skip("test requires TensorFlow probability")(test_case)
     else:
         return test_case
 
@@ -311,6 +371,16 @@ def require_pandas(test_case):
         return test_case
 
 
+def require_pytesseract(test_case):
+    """
+    Decorator marking a test that requires PyTesseract. These tests are skipped when PyTesseract isn't installed.
+    """
+    if not is_pytesseract_available():
+        return unittest.skip("test requires PyTesseract")(test_case)
+    else:
+        return test_case
+
+
 def require_scatter(test_case):
     """
     Decorator marking a test that requires PyTorch Scatter. These tests are skipped when PyTorch Scatter isn't
@@ -322,6 +392,17 @@ def require_scatter(test_case):
         return test_case
 
 
+def require_pytorch_quantization(test_case):
+    """
+    Decorator marking a test that requires PyTorch Quantization Toolkit. These tests are skipped when PyTorch
+    Quantization Toolkit isn't installed.
+    """
+    if not is_pytorch_quantization_available():
+        return unittest.skip("test requires PyTorch Quantization Toolkit")(test_case)
+    else:
+        return test_case
+
+
 def require_vision(test_case):
     """
     Decorator marking a test that requires the vision dependencies. These tests are skipped when torchaudio isn't
@@ -329,6 +410,26 @@ def require_vision(test_case):
     """
     if not is_vision_available():
         return unittest.skip("test requires vision")(test_case)
+    else:
+        return test_case
+
+
+def require_ftfy(test_case):
+    """
+    Decorator marking a test that requires ftfy. These tests are skipped when ftfy isn't installed.
+    """
+    if not is_ftfy_available():
+        return unittest.skip("test requires ftfy")(test_case)
+    else:
+        return test_case
+
+
+def require_spacy(test_case):
+    """
+    Decorator marking a test that requires SpaCy. These tests are skipped when SpaCy isn't installed.
+    """
+    if not is_spacy_available():
+        return unittest.skip("test requires spacy")(test_case)
     else:
         return test_case
 
@@ -366,6 +467,21 @@ def require_torch_non_multi_gpu(test_case):
         return test_case
 
 
+def require_torch_up_to_2_gpus(test_case):
+    """
+    Decorator marking a test that requires 0 or 1 or 2 GPU setup (in PyTorch).
+    """
+    if not is_torch_available():
+        return unittest.skip("test requires PyTorch")(test_case)
+
+    import torch
+
+    if torch.cuda.device_count() > 2:
+        return unittest.skip("test requires 0 or 1 or 2 GPUs")(test_case)
+    else:
+        return test_case
+
+
 def require_torch_tpu(test_case):
     """
     Decorator marking a test that requires a TPU (in PyTorch).
@@ -387,6 +503,13 @@ else:
 if is_tf_available():
     import tensorflow as tf
 
+if is_flax_available():
+    import jax
+
+    jax_device = jax.default_backend()
+else:
+    jax_device = None
+
 
 def require_torch_gpu(test_case):
     """Decorator marking a test that requires CUDA and PyTorch."""
@@ -396,11 +519,26 @@ def require_torch_gpu(test_case):
         return test_case
 
 
-def require_datasets(test_case):
-    """Decorator marking a test that requires datasets."""
+def require_torch_bf16(test_case):
+    """Decorator marking a test that requires Ampere or a newer GPU arch, cuda>=11 and torch>=1.10."""
+    if not is_torch_bf16_available():
+        return unittest.skip("test requires Ampere or a newer GPU arch, cuda>=11 and torch>=1.10")(test_case)
+    else:
+        return test_case
 
-    if not is_datasets_available():
-        return unittest.skip("test requires `datasets`")(test_case)
+
+def require_torch_tf32(test_case):
+    """Decorator marking a test that requires Ampere or a newer GPU arch, cuda>=11 and torch>=1.7."""
+    if not is_torch_tf32_available():
+        return unittest.skip("test requires Ampere or a newer GPU arch, cuda>=11 and torch>=1.7")(test_case)
+    else:
+        return test_case
+
+
+def require_detectron2(test_case):
+    """Decorator marking a test that requires detectron2."""
+    if not is_detectron2_available():
+        return unittest.skip("test requires `detectron2`")(test_case)
     else:
         return test_case
 
@@ -439,6 +577,32 @@ def require_ray(test_case):
         return test_case
 
 
+def require_sigopt(test_case):
+    """
+    Decorator marking a test that requires SigOpt.
+
+    These tests are skipped when SigOpt isn't installed.
+
+    """
+    if not is_sigopt_available():
+        return unittest.skip("test requires SigOpt")(test_case)
+    else:
+        return test_case
+
+
+def require_wandb(test_case):
+    """
+    Decorator marking a test that requires wandb.
+
+    These tests are skipped when wandb isn't installed.
+
+    """
+    if not is_wandb_available():
+        return unittest.skip("test requires wandb")(test_case)
+    else:
+        return test_case
+
+
 def require_soundfile(test_case):
     """
     Decorator marking a test that requires soundfile
@@ -452,9 +616,49 @@ def require_soundfile(test_case):
         return test_case
 
 
+def require_deepspeed(test_case):
+    """
+    Decorator marking a test that requires deepspeed
+    """
+    if not is_deepspeed_available():
+        return unittest.skip("test requires deepspeed")(test_case)
+    else:
+        return test_case
+
+
+def require_phonemizer(test_case):
+    """
+    Decorator marking a test that requires phonemizer
+    """
+    if not is_phonemizer_available():
+        return unittest.skip("test requires phonemizer")(test_case)
+    else:
+        return test_case
+
+
+def require_pyctcdecode(test_case):
+    """
+    Decorator marking a test that requires pyctcdecode
+    """
+    if not is_pyctcdecode_available():
+        return unittest.skip("test requires pyctcdecode")(test_case)
+    else:
+        return test_case
+
+
+def require_librosa(test_case):
+    """
+    Decorator marking a test that requires librosa
+    """
+    if not is_librosa_available():
+        return unittest.skip("test requires librosa")(test_case)
+    else:
+        return test_case
+
+
 def get_gpu_count():
     """
-    Return the number of available gpus (regardless of whether torch or tf is used)
+    Return the number of available gpus (regardless of whether torch, tf or jax is used)
     """
     if is_torch_available():
         import torch
@@ -464,6 +668,10 @@ def get_gpu_count():
         import tensorflow as tf
 
         return len(tf.config.list_physical_devices("GPU"))
+    elif is_flax_available():
+        import jax
+
+        return jax.device_count()
     else:
         return 0
 
@@ -481,6 +689,10 @@ def get_tests_dir(append_path=None):
     # this function caller's __file__
     caller__file__ = inspect.stack()[1][1]
     tests_dir = os.path.abspath(os.path.dirname(caller__file__))
+
+    while not tests_dir.endswith("tests"):
+        tests_dir = os.path.dirname(tests_dir)
+
     if append_path:
         return os.path.join(tests_dir, append_path)
     else:
@@ -515,34 +727,55 @@ class CaptureStd:
     """
     Context manager to capture:
 
-        - stdout, clean it up and make it available via obj.out
-        - stderr, and make it available via obj.err
+        - stdout: replay it, clean it up and make it available via `obj.out`
+        - stderr: replay it and make it available via `obj.err`
 
-        init arguments:
+    Args:
+        out (`bool`, *optional*, defaults to `True`): Whether to capture stdout or not.
+        err (`bool`, *optional*, defaults to `True`): Whether to capture stderr or not.
+        replay (`bool`, *optional*, defaults to `True`): Whether to replay or not.
+            By default each captured stream gets replayed back on context's exit, so that one can see what the test was
+            doing. If this is a not wanted behavior and the captured data shouldn't be replayed, pass `replay=False` to
+            disable this feature.
 
-        - out - capture stdout: True/False, default True
-        - err - capture stdout: True/False, default True
+    Examples:
 
-        Examples::
+    ```python
+    # to capture stdout only with auto-replay
+    with CaptureStdout() as cs:
+        print("Secret message")
+    assert "message" in cs.out
 
-            with CaptureStdout() as cs:
-                print("Secret message")
-            print(f"captured: {cs.out}")
+    # to capture stderr only with auto-replay
+    import sys
 
-            import sys
-            with CaptureStderr() as cs:
-                print("Warning: ", file=sys.stderr)
-            print(f"captured: {cs.err}")
+    with CaptureStderr() as cs:
+        print("Warning: ", file=sys.stderr)
+    assert "Warning" in cs.err
 
-            # to capture just one of the streams, but not the other
-            with CaptureStd(err=False) as cs:
-                print("Secret message")
-            print(f"captured: {cs.out}")
-            # but best use the stream-specific subclasses
+    # to capture both streams with auto-replay
+    with CaptureStd() as cs:
+        print("Secret message")
+        print("Warning: ", file=sys.stderr)
+    assert "message" in cs.out
+    assert "Warning" in cs.err
 
-    """
+    # to capture just one of the streams, and not the other, with auto-replay
+    with CaptureStd(err=False) as cs:
+        print("Secret message")
+    assert "message" in cs.out
+    # but best use the stream-specific subclasses
 
-    def __init__(self, out=True, err=True):
+    # to capture without auto-replay
+    with CaptureStd(replay=False) as cs:
+        print("Secret message")
+    assert "message" in cs.out
+    ```"""
+
+    def __init__(self, out=True, err=True, replay=True):
+
+        self.replay = replay
+
         if out:
             self.out_buf = StringIO()
             self.out = "error: CaptureStd context is unfinished yet, called too early"
@@ -571,11 +804,17 @@ class CaptureStd:
     def __exit__(self, *exc):
         if self.out_buf:
             sys.stdout = self.out_old
-            self.out = apply_print_resets(self.out_buf.getvalue())
+            captured = self.out_buf.getvalue()
+            if self.replay:
+                sys.stdout.write(captured)
+            self.out = apply_print_resets(captured)
 
         if self.err_buf:
             sys.stderr = self.err_old
-            self.err = self.err_buf.getvalue()
+            captured = self.err_buf.getvalue()
+            if self.replay:
+                sys.stderr.write(captured)
+            self.err = captured
 
     def __repr__(self):
         msg = ""
@@ -595,15 +834,15 @@ class CaptureStd:
 class CaptureStdout(CaptureStd):
     """Same as CaptureStd but captures only stdout"""
 
-    def __init__(self):
-        super().__init__(err=False)
+    def __init__(self, replay=True):
+        super().__init__(err=False, replay=replay)
 
 
 class CaptureStderr(CaptureStd):
     """Same as CaptureStd but captures only stderr"""
 
-    def __init__(self):
-        super().__init__(out=False)
+    def __init__(self, replay=True):
+        super().__init__(out=False, replay=replay)
 
 
 class CaptureLogger:
@@ -611,23 +850,24 @@ class CaptureLogger:
     Context manager to capture `logging` streams
 
     Args:
+        logger: 'logging` logger object
 
-    - logger: 'logging` logger object
-
-    Results:
+    Returns:
         The captured output is available via `self.out`
 
-    Example::
+    Example:
 
-        >>> from transformers import logging
-        >>> from transformers.testing_utils import CaptureLogger
+    ```python
+    >>> from transformers import logging
+    >>> from transformers.testing_utils import CaptureLogger
 
-        >>> msg = "Testing 1, 2, 3"
-        >>> logging.set_verbosity_info()
-        >>> logger = logging.get_logger("transformers.models.bart.tokenization_bart")
-        >>> with CaptureLogger(logger) as cl:
-        ...     logger.info(msg)
-        >>> assert cl.out, msg+"\n"
+    >>> msg = "Testing 1, 2, 3"
+    >>> logging.set_verbosity_info()
+    >>> logger = logging.get_logger("transformers.models.bart.tokenization_bart")
+    >>> with CaptureLogger(logger) as cl:
+    ...     logger.info(msg)
+    >>> assert cl.out, msg + "\n"
+    ```
     """
 
     def __init__(self, logger):
@@ -649,16 +889,38 @@ class CaptureLogger:
 
 
 @contextlib.contextmanager
+def LoggingLevel(level):
+    """
+    This is a context manager to temporarily change transformers modules logging level to the desired value and have it
+    restored to the original setting at the end of the scope.
+
+    Example:
+
+    ```python
+    with LoggingLevel(logging.INFO):
+        AutoModel.from_pretrained("gpt2")  # calls logger.info() several times
+    ```
+    """
+    orig_level = transformers_logging.get_verbosity()
+    try:
+        transformers_logging.set_verbosity(level)
+        yield
+    finally:
+        transformers_logging.set_verbosity(orig_level)
+
+
+@contextlib.contextmanager
 # adapted from https://stackoverflow.com/a/64789046/9201239
 def ExtendSysPath(path: Union[str, os.PathLike]) -> Iterator[None]:
     """
     Temporary add given path to `sys.path`.
 
-    Usage ::
+    Usage :
 
-       with ExtendSysPath('/path/to/dir'):
-           mymodule = importlib.import_module('mymodule')
-
+    ```python
+    with ExtendSysPath("/path/to/dir"):
+        mymodule = importlib.import_module("mymodule")
+    ```
     """
 
     path = os.fspath(path)
@@ -671,7 +933,7 @@ def ExtendSysPath(path: Union[str, os.PathLike]) -> Iterator[None]:
 
 class TestCasePlus(unittest.TestCase):
     """
-    This class extends `unittest.TestCase` with additional features.
+    This class extends *unittest.TestCase* with additional features.
 
     Feature 1: A set of fully resolved important file and dir path accessors.
 
@@ -679,75 +941,74 @@ class TestCasePlus(unittest.TestCase):
     test could be invoked from more than one directory or could reside in sub-directories with different depths. This
     class solves this problem by sorting out all the basic paths and provides easy accessors to them:
 
-    * ``pathlib`` objects (all fully resolved):
+    - `pathlib` objects (all fully resolved):
 
-       - ``test_file_path`` - the current test file path (=``__file__``)
-       - ``test_file_dir`` - the directory containing the current test file
-       - ``tests_dir`` - the directory of the ``tests`` test suite
-       - ``examples_dir`` - the directory of the ``examples`` test suite
-       - ``repo_root_dir`` - the directory of the repository
-       - ``src_dir`` - the directory of ``src`` (i.e. where the ``transformers`` sub-dir resides)
+       - `test_file_path` - the current test file path (=`__file__`)
+       - `test_file_dir` - the directory containing the current test file
+       - `tests_dir` - the directory of the `tests` test suite
+       - `examples_dir` - the directory of the `examples` test suite
+       - `repo_root_dir` - the directory of the repository
+       - `src_dir` - the directory of `src` (i.e. where the `transformers` sub-dir resides)
 
-    * stringified paths---same as above but these return paths as strings, rather than ``pathlib`` objects:
+    - stringified paths---same as above but these return paths as strings, rather than `pathlib` objects:
 
-       - ``test_file_path_str``
-       - ``test_file_dir_str``
-       - ``tests_dir_str``
-       - ``examples_dir_str``
-       - ``repo_root_dir_str``
-       - ``src_dir_str``
+       - `test_file_path_str`
+       - `test_file_dir_str`
+       - `tests_dir_str`
+       - `examples_dir_str`
+       - `repo_root_dir_str`
+       - `src_dir_str`
 
     Feature 2: Flexible auto-removable temporary dirs which are guaranteed to get removed at the end of test.
 
     1. Create a unique temporary dir:
 
-    ::
+    ```python
+    def test_whatever(self):
+        tmp_dir = self.get_auto_remove_tmp_dir()
+    ```
 
-        def test_whatever(self):
-            tmp_dir = self.get_auto_remove_tmp_dir()
-
-    ``tmp_dir`` will contain the path to the created temporary dir. It will be automatically removed at the end of the
+    `tmp_dir` will contain the path to the created temporary dir. It will be automatically removed at the end of the
     test.
 
 
     2. Create a temporary dir of my choice, ensure it's empty before the test starts and don't
     empty it after the test.
 
-    ::
-
-        def test_whatever(self):
-            tmp_dir = self.get_auto_remove_tmp_dir("./xxx")
+    ```python
+    def test_whatever(self):
+        tmp_dir = self.get_auto_remove_tmp_dir("./xxx")
+    ```
 
     This is useful for debug when you want to monitor a specific directory and want to make sure the previous tests
     didn't leave any data in there.
 
-    3. You can override the first two options by directly overriding the ``before`` and ``after`` args, leading to the
-       following behavior:
+    3. You can override the first two options by directly overriding the `before` and `after` args, leading to the
+        following behavior:
 
-    ``before=True``: the temporary dir will always be cleared at the beginning of the test.
+    `before=True`: the temporary dir will always be cleared at the beginning of the test.
 
-    ``before=False``: if the temporary dir already existed, any existing files will remain there.
+    `before=False`: if the temporary dir already existed, any existing files will remain there.
 
-    ``after=True``: the temporary dir will always be deleted at the end of the test.
+    `after=True`: the temporary dir will always be deleted at the end of the test.
 
-    ``after=False``: the temporary dir will always be left intact at the end of the test.
+    `after=False`: the temporary dir will always be left intact at the end of the test.
 
-    Note 1: In order to run the equivalent of ``rm -r`` safely, only subdirs of the project repository checkout are
-    allowed if an explicit ``tmp_dir`` is used, so that by mistake no ``/tmp`` or similar important part of the
-    filesystem will get nuked. i.e. please always pass paths that start with ``./``
+    Note 1: In order to run the equivalent of `rm -r` safely, only subdirs of the project repository checkout are
+    allowed if an explicit `tmp_dir` is used, so that by mistake no `/tmp` or similar important part of the filesystem
+    will get nuked. i.e. please always pass paths that start with `./`
 
     Note 2: Each test can register multiple temporary dirs and they all will get auto-removed, unless requested
     otherwise.
 
-    Feature 3: Get a copy of the ``os.environ`` object that sets up ``PYTHONPATH`` specific to the current test suite.
-    This is useful for invoking external programs from the test suite - e.g. distributed training.
+    Feature 3: Get a copy of the `os.environ` object that sets up `PYTHONPATH` specific to the current test suite. This
+    is useful for invoking external programs from the test suite - e.g. distributed training.
 
 
-    ::
-        def test_whatever(self):
-            env = self.get_env()
-
-    """
+    ```python
+    def test_whatever(self):
+        env = self.get_env()
+    ```"""
 
     def setUp(self):
         # get_auto_remove_tmp_dir feature:
@@ -819,12 +1080,11 @@ class TestCasePlus(unittest.TestCase):
 
     def get_env(self):
         """
-        Return a copy of the ``os.environ`` object that sets up ``PYTHONPATH`` correctly, depending on the test suite
-        it's invoked from. This is useful for invoking external programs from the test suite - e.g. distributed
-        training.
+        Return a copy of the `os.environ` object that sets up `PYTHONPATH` correctly, depending on the test suite it's
+        invoked from. This is useful for invoking external programs from the test suite - e.g. distributed training.
 
-        It always inserts ``./src`` first, then ``./tests`` or ``./examples`` depending on the test suite type and
-        finally the preset ``PYTHONPATH`` if any (all full resolved paths).
+        It always inserts `./src` first, then `./tests` or `./examples` depending on the test suite type and finally
+        the preset `PYTHONPATH` if any (all full resolved paths).
 
         """
         env = os.environ.copy()
@@ -841,27 +1101,26 @@ class TestCasePlus(unittest.TestCase):
     def get_auto_remove_tmp_dir(self, tmp_dir=None, before=None, after=None):
         """
         Args:
-            tmp_dir (:obj:`string`, `optional`):
-                if :obj:`None`:
+            tmp_dir (`string`, *optional*):
+                if `None`:
 
                    - a unique temporary path will be created
-                   - sets ``before=True`` if ``before`` is :obj:`None`
-                   - sets ``after=True`` if ``after`` is :obj:`None`
+                   - sets `before=True` if `before` is `None`
+                   - sets `after=True` if `after` is `None`
                 else:
 
-                   - :obj:`tmp_dir` will be created
-                   - sets ``before=True`` if ``before`` is :obj:`None`
-                   - sets ``after=False`` if ``after`` is :obj:`None`
-            before (:obj:`bool`, `optional`):
-                If :obj:`True` and the :obj:`tmp_dir` already exists, make sure to empty it right away if :obj:`False`
-                and the :obj:`tmp_dir` already exists, any existing files will remain there.
-            after (:obj:`bool`, `optional`):
-                If :obj:`True`, delete the :obj:`tmp_dir` at the end of the test if :obj:`False`, leave the
-                :obj:`tmp_dir` and its contents intact at the end of the test.
+                   - `tmp_dir` will be created
+                   - sets `before=True` if `before` is `None`
+                   - sets `after=False` if `after` is `None`
+            before (`bool`, *optional*):
+                If `True` and the `tmp_dir` already exists, make sure to empty it right away if `False` and the
+                `tmp_dir` already exists, any existing files will remain there.
+            after (`bool`, *optional*):
+                If `True`, delete the `tmp_dir` at the end of the test if `False`, leave the `tmp_dir` and its contents
+                intact at the end of the test.
 
         Returns:
-            tmp_dir(:obj:`string`): either the same value as passed via `tmp_dir` or the path to the auto-selected tmp
-            dir
+            tmp_dir(`string`): either the same value as passed via *tmp_dir* or the path to the auto-selected tmp dir
         """
         if tmp_dir is not None:
 
@@ -920,22 +1179,20 @@ def mockenv(**kwargs):
     """
     this is a convenience wrapper, that allows this ::
 
-    @mockenv(RUN_SLOW=True, USE_TF=False)
-    def test_something():
-        run_slow = os.getenv("RUN_SLOW", False)
-        use_tf = os.getenv("USE_TF", False)
+    @mockenv(RUN_SLOW=True, USE_TF=False) def test_something():
+        run_slow = os.getenv("RUN_SLOW", False) use_tf = os.getenv("USE_TF", False)
 
     """
-    return unittest.mock.patch.dict(os.environ, kwargs)
+    return mock.patch.dict(os.environ, kwargs)
 
 
 # from https://stackoverflow.com/a/34333710/9201239
 @contextlib.contextmanager
 def mockenv_context(*remove, **update):
     """
-    Temporarily updates the ``os.environ`` dictionary in-place. Similar to mockenv
+    Temporarily updates the `os.environ` dictionary in-place. Similar to mockenv
 
-    The ``os.environ`` dictionary is updated in-place so that the modification is sure to work in all situations.
+    The `os.environ` dictionary is updated in-place so that the modification is sure to work in all situations.
 
     Args:
       remove: Environment variables to remove.
@@ -1002,9 +1259,9 @@ def pytest_terminal_summary_main(tr, id):
     - id: unique id like `tests` or `examples` that will be incorporated into the final reports filenames - this is
       needed as some jobs have multiple runs of pytest, so we can't have them overwrite each other.
 
-    NB: this functions taps into a private _pytest API and while unlikely, it could break should
-    pytest do internal changes - also it calls default internal methods of terminalreporter which
-    can be hijacked by various `pytest-` plugins and interfere.
+    NB: this functions taps into a private _pytest API and while unlikely, it could break should pytest do internal
+    changes - also it calls default internal methods of terminalreporter which can be hijacked by various `pytest-`
+    plugins and interfere.
 
     """
     from _pytest.config import create_terminal_writer
@@ -1017,10 +1274,10 @@ def pytest_terminal_summary_main(tr, id):
     orig_tbstyle = config.option.tbstyle
     orig_reportchars = tr.reportchars
 
-    dir = "reports"
+    dir = f"reports/{id}"
     Path(dir).mkdir(parents=True, exist_ok=True)
     report_files = {
-        k: f"{dir}/{id}_{k}.txt"
+        k: f"{dir}/{k}.txt"
         for k in [
             "durations",
             "errors",
@@ -1202,6 +1459,28 @@ def execute_subprocess_async(cmd, env=None, stdin=None, timeout=180, quiet=False
     return result
 
 
+def pytest_xdist_worker_id():
+    """
+    Returns an int value of worker's numerical id under `pytest-xdist`'s concurrent workers `pytest -n N` regime, or 0
+    if `-n 1` or `pytest-xdist` isn't being used.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "gw0")
+    worker = re.sub(r"^gw", "", worker, 0, re.M)
+    return int(worker)
+
+
+def get_torch_dist_unique_port():
+    """
+    Returns a port number that can be fed to `torch.distributed.launch`'s `--master_port` argument.
+
+    Under `pytest-xdist` it adds a delta number based on a worker id so that concurrent tests don't try to use the same
+    port at once.
+    """
+    port = 29500
+    uniq_delta = pytest_xdist_worker_id()
+    return port + uniq_delta
+
+
 def nested_simplify(obj, decimals=3):
     """
     Simplifies an object by rounding float numbers, and downcasting tensors/numpy arrays to get simple equality test
@@ -1219,13 +1498,15 @@ def nested_simplify(obj, decimals=3):
         return {nested_simplify(k, decimals): nested_simplify(v, decimals) for k, v in obj.items()}
     elif isinstance(obj, (str, int, np.int64)):
         return obj
+    elif obj is None:
+        return obj
     elif is_torch_available() and isinstance(obj, torch.Tensor):
         return nested_simplify(obj.tolist(), decimals)
     elif is_tf_available() and tf.is_tensor(obj):
         return nested_simplify(obj.numpy().tolist())
     elif isinstance(obj, float):
         return round(obj, decimals)
-    elif isinstance(obj, np.float32):
+    elif isinstance(obj, (np.int32, np.float32)):
         return nested_simplify(obj.item(), decimals)
     else:
         raise Exception(f"Not supported: {type(obj)}")

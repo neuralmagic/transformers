@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" PyTorch RoFormer model. """
+""" PyTorch RoFormer model."""
 
 
 import math
@@ -23,7 +23,7 @@ import numpy as np
 import torch
 import torch.utils.checkpoint
 from torch import nn
-from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
 from ...file_utils import (
@@ -60,7 +60,11 @@ _TOKENIZER_FOR_DOC = "RoFormerTokenizer"
 
 ROFORMER_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "junnyu/roformer_chinese_small",
-    "junnyu/roformer_chinese_base"
+    "junnyu/roformer_chinese_base",
+    "junnyu/roformer_chinese_char_small",
+    "junnyu/roformer_chinese_char_base",
+    "junnyu/roformer_small_discriminator",
+    "junnyu/roformer_small_generator"
     # See all RoFormer models at https://huggingface.co/models?filter=roformer
 ]
 
@@ -163,9 +167,8 @@ def load_tf_weights_in_roformer(model, config, tf_checkpoint_path):
         elif m_name == "kernel":
             array = np.transpose(array)
         try:
-            assert (
-                pointer.shape == array.shape
-            ), f"Pointer shape {pointer.shape} and array shape {array.shape} mismatched"
+            if not pointer.shape == array.shape:
+                raise ValueError(f"Pointer shape {pointer.shape} and array shape {array.shape} mismatched")
         except AssertionError as e:
             e.args += (pointer.shape, array.shape)
             raise
@@ -298,7 +301,7 @@ class RoFormerSelfAttention(nn.Module):
             attention_scores = attention_scores + attention_mask
 
         # Normalize the attention scores to probabilities.
-        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -327,9 +330,9 @@ class RoFormerSelfAttention(nn.Module):
         # cos [batch_size, num_heads, sequence_length, embed_size_per_head//2]
         sin, cos = sinusoidal_pos.chunk(2, dim=-1)
         # sin [θ0,θ1,θ2......θd/2-1] -> sin_pos [θ0,θ0,θ1,θ1,θ2,θ2......θd/2-1,θd/2-1]
-        sin_pos = torch.repeat_interleave(sin, 2, dim=-1)
+        sin_pos = torch.stack([sin, sin], dim=-1).reshape_as(sinusoidal_pos)
         # cos [θ0,θ1,θ2......θd/2-1] -> cos_pos [θ0,θ0,θ1,θ1,θ2,θ2......θd/2-1,θd/2-1]
-        cos_pos = torch.repeat_interleave(cos, 2, dim=-1)
+        cos_pos = torch.stack([cos, cos], dim=-1).reshape_as(sinusoidal_pos)
         # rotate_half_query_layer [-q1,q0,-q3,q2......,-qd-1,qd-2]
         rotate_half_query_layer = torch.stack([-query_layer[..., 1::2], query_layer[..., ::2]], dim=-1).reshape_as(
             query_layer
@@ -364,14 +367,12 @@ class RoFormerSelfOutput(nn.Module):
 
 
 class RoFormerAttention(nn.Module):
-    # Copied from transformers.models.bert.modeling_bert.BertAttention.__init__ with Bert->RoFormer
     def __init__(self, config):
         super().__init__()
         self.self = RoFormerSelfAttention(config)
         self.output = RoFormerSelfOutput(config)
         self.pruned_heads = set()
 
-    # End Copy
     # Copied from transformers.models.bert.modeling_bert.BertAttention.prune_heads
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -450,7 +451,6 @@ class RoFormerOutput(nn.Module):
 
 
 class RoFormerLayer(nn.Module):
-    # Copied from transformers.models.bert.modeling_bert.BertLayer.__init__ with Bert->RoFormer
     def __init__(self, config):
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
@@ -459,12 +459,12 @@ class RoFormerLayer(nn.Module):
         self.is_decoder = config.is_decoder
         self.add_cross_attention = config.add_cross_attention
         if self.add_cross_attention:
-            assert self.is_decoder, f"{self} should be used as a decoder model if cross attention is added"
+            if not self.is_decoder:
+                raise ValueError(f"{self} should be used as a decoder model if cross attention is added")
             self.crossattention = RoFormerAttention(config)
         self.intermediate = RoFormerIntermediate(config)
         self.output = RoFormerOutput(config)
 
-    # End Copy
     def forward(
         self,
         hidden_states,
@@ -547,6 +547,7 @@ class RoFormerEncoder(nn.Module):
             config.max_position_embeddings, config.hidden_size // config.num_attention_heads
         )
         self.layer = nn.ModuleList([RoFormerLayer(config) for _ in range(config.num_hidden_layers)])
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -576,12 +577,11 @@ class RoFormerEncoder(nn.Module):
             layer_head_mask = head_mask[i] if head_mask is not None else None
             past_key_value = past_key_values[i] if past_key_values is not None else None
 
-            if getattr(self.config, "gradient_checkpointing", False) and self.training:
+            if self.gradient_checkpointing and self.training:
 
                 if use_cache:
                     logger.warning(
-                        "`use_cache=True` is incompatible with `config.gradient_checkpointing=True`. Setting "
-                        "`use_cache=False`..."
+                        "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
                     )
                     use_cache = False
 
@@ -701,6 +701,7 @@ class RoFormerPreTrainedModel(PreTrainedModel):
     config_class = RoFormerConfig
     load_tf_weights = load_tf_weights_in_roformer
     base_model_prefix = "roformer"
+    supports_gradient_checkpointing = True
     _keys_to_ignore_on_load_missing = []
     _keys_to_ignore_on_load_unexpected = [
         r"roformer\.embeddings_project\.weight",
@@ -725,62 +726,64 @@ class RoFormerPreTrainedModel(PreTrainedModel):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
 
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, RoFormerEncoder):
+            module.gradient_checkpointing = value
+
 
 ROFORMER_START_DOCSTRING = r"""
-    This model is a PyTorch `torch.nn.Module <https://pytorch.org/docs/stable/nn.html#torch.nn.Module>`_ sub-class. Use
+    This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) sub-class. Use
     it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage and
     behavior.
 
     Parameters:
-        config (:class:`~transformers.RoFormerConfig`): Model configuration class with all the parameters of the model.
+        config ([`RoFormerConfig`]): Model configuration class with all the parameters of the model.
             Initializing with a config file does not load the weights associated with the model, only the
-            configuration. Check out the :meth:`~transformers.PreTrainedModel.from_pretrained` method to load the model
-            weights.
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
 """
 
 ROFORMER_INPUTS_DOCSTRING = r"""
     Args:
-        input_ids (:obj:`torch.LongTensor` of shape :obj:`{0}`):
+        input_ids (`torch.LongTensor` of shape `({0})`):
             Indices of input sequence tokens in the vocabulary.
 
-            Indices can be obtained using :class:`transformers.RoFormerTokenizer`. See
-            :func:`transformers.PreTrainedTokenizer.encode` and :func:`transformers.PreTrainedTokenizer.__call__` for
-            details.
+            Indices can be obtained using [`RoFormerTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+            [`PreTrainedTokenizer.__call__`] for details.
 
-            `What are input IDs? <../glossary.html#input-ids>`__
-        attention_mask (:obj:`torch.FloatTensor` of shape :obj:`{0}`, `optional`):
-            Mask to avoid performing attention on padding token indices. Mask values selected in ``[0, 1]``:
+            [What are input IDs?](../glossary#input-ids)
+        attention_mask (`torch.FloatTensor` of shape `({0})`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
 
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
 
-            `What are attention masks? <../glossary.html#attention-mask>`__
-        token_type_ids (:obj:`torch.LongTensor` of shape :obj:`{0}`, `optional`):
-            Segment token indices to indicate first and second portions of the inputs. Indices are selected in ``[0,
-            1]``:
+            [What are attention masks?](../glossary#attention-mask)
+        token_type_ids (`torch.LongTensor` of shape `({0})`, *optional*):
+            Segment token indices to indicate first and second portions of the inputs. Indices are selected in `[0,
+            1]`:
 
-            - 0 corresponds to a `sentence A` token,
-            - 1 corresponds to a `sentence B` token.
+            - 0 corresponds to a *sentence A* token,
+            - 1 corresponds to a *sentence B* token.
 
-            `What are token type IDs? <../glossary.html#token-type-ids>`_
-        head_mask (:obj:`torch.FloatTensor` of shape :obj:`(num_heads,)` or :obj:`(num_layers, num_heads)`, `optional`):
-            Mask to nullify selected heads of the self-attention modules. Mask values selected in ``[0, 1]``:
+            [What are token type IDs?](../glossary#token-type-ids)
+        head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
+            Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
 
             - 1 indicates the head is **not masked**,
             - 0 indicates the head is **masked**.
 
-        inputs_embeds (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
-            Optionally, instead of passing :obj:`input_ids` you can choose to directly pass an embedded representation.
-            This is useful if you want more control over how to convert `input_ids` indices into associated vectors
-            than the model's internal embedding lookup matrix.
-        output_attentions (:obj:`bool`, `optional`):
-            Whether or not to return the attentions tensors of all attention layers. See ``attentions`` under returned
+        inputs_embeds (`torch.FloatTensor` of shape `({0}, hidden_size)`, *optional*):
+            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation. This
+            is useful if you want more control over how to convert *input_ids* indices into associated vectors than the
+            model's internal embedding lookup matrix.
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
             tensors for more detail.
-        output_hidden_states (:obj:`bool`, `optional`):
-            Whether or not to return the hidden states of all layers. See ``hidden_states`` under returned tensors for
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
             more detail.
-        return_dict (:obj:`bool`, `optional`):
-            Whether or not to return a :class:`~transformers.file_utils.ModelOutput` instead of a plain tuple.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~file_utils.ModelOutput`] instead of a plain tuple.
 """
 
 
@@ -792,14 +795,13 @@ class RoFormerModel(RoFormerPreTrainedModel):
     """
 
     The model can behave as an encoder (with only self-attention) as well as a decoder, in which case a layer of
-    cross-attention is added between the self-attention layers, following the architecture described in `Attention is
-    all you need <https://arxiv.org/abs/1706.03762>`__ by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
+    cross-attention is added between the self-attention layers, following the architecture described in [Attention is
+    all you need](https://arxiv.org/abs/1706.03762) by Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
     Llion Jones, Aidan N. Gomez, Lukasz Kaiser and Illia Polosukhin.
 
-    To behave as an decoder the model needs to be initialized with the :obj:`is_decoder` argument of the configuration
-    set to :obj:`True`. To be used in a Seq2Seq model, the model needs to initialized with both :obj:`is_decoder`
-    argument and :obj:`add_cross_attention` set to :obj:`True`; an :obj:`encoder_hidden_states` is then expected as an
-    input to the forward pass.
+    To behave as an decoder the model needs to be initialized with the `is_decoder` argument of the configuration set
+    to `True`. To be used in a Seq2Seq model, the model needs to initialized with both `is_decoder` argument and
+    `add_cross_attention` set to `True`; an `encoder_hidden_states` is then expected as an input to the forward pass.
     """
 
     def __init__(self, config):
@@ -812,7 +814,8 @@ class RoFormerModel(RoFormerPreTrainedModel):
 
         self.encoder = RoFormerEncoder(config)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -828,9 +831,9 @@ class RoFormerModel(RoFormerPreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
 
-    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"))
+    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=BaseModelOutputWithPastAndCrossAttentions,
         config_class=_CONFIG_FOR_DOC,
@@ -851,23 +854,23 @@ class RoFormerModel(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+        encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
             Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
             the model is configured as a decoder.
-        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+        encoder_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
-            the cross-attention if the model is configured as a decoder. Mask values selected in ``[0, 1]``:
+            the cross-attention if the model is configured as a decoder. Mask values selected in `[0, 1]`:
 
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
-        past_key_values (:obj:`tuple(tuple(torch.FloatTensor))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
+        past_key_values (`tuple(tuple(torch.FloatTensor))` of length `config.n_layers` with each tuple having 4 tensors of shape `(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
             Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
-            If :obj:`past_key_values` are used, the user can optionally input only the last :obj:`decoder_input_ids`
-            (those that don't have their past key value states given to this model) of shape :obj:`(batch_size, 1)`
-            instead of all :obj:`decoder_input_ids` of shape :obj:`(batch_size, sequence_length)`.
-        use_cache (:obj:`bool`, `optional`):
-            If set to :obj:`True`, :obj:`past_key_values` key value states are returned and can be used to speed up
-            decoding (see :obj:`past_key_values`).
+            If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
+            don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
+            `decoder_input_ids` of shape `(batch_size, sequence_length)`.
+        use_cache (`bool`, *optional*):
+            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
+            `past_key_values`).
         """
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -884,13 +887,12 @@ class RoFormerModel(RoFormerPreTrainedModel):
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
             input_shape = input_ids.size()
-            batch_size, seq_length = input_shape
         elif inputs_embeds is not None:
             input_shape = inputs_embeds.size()[:-1]
-            batch_size, seq_length = input_shape
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
+        batch_size, seq_length = input_shape
         device = input_ids.device if input_ids is not None else inputs_embeds.device
 
         # past_key_values_length
@@ -955,7 +957,7 @@ class RoFormerModel(RoFormerPreTrainedModel):
         )
 
 
-@add_start_docstrings("""RoFormer Model with a `language modeling` head on top. """, ROFORMER_START_DOCSTRING)
+@add_start_docstrings("""RoFormer Model with a `language modeling` head on top.""", ROFORMER_START_DOCSTRING)
 class RoFormerForMaskedLM(RoFormerPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -969,7 +971,8 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
         self.roformer = RoFormerModel(config)
         self.cls = RoFormerOnlyMLMHead(config)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
     def get_output_embeddings(self):
         return self.cls.predictions.decoder
@@ -977,9 +980,9 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
     def set_output_embeddings(self, new_embeddings):
         self.cls.predictions.decoder = new_embeddings
 
-    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"))
+    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=MaskedLMOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -999,10 +1002,10 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-            Labels for computing the masked language modeling loss. Indices should be in ``[-100, 0, ...,
-            config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are ignored
-            (masked), the loss is only computed for the tokens with labels in ``[0, ..., config.vocab_size]``.
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the masked language modeling loss. Indices should be in `[-100, 0, ...,
+            config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are ignored (masked), the
+            loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1054,7 +1057,7 @@ class RoFormerForMaskedLM(RoFormerPreTrainedModel):
 
 
 @add_start_docstrings(
-    """RoFormer Model with a `language modeling` head on top for CLM fine-tuning. """, ROFORMER_START_DOCSTRING
+    """RoFormer Model with a `language modeling` head on top for CLM fine-tuning.""", ROFORMER_START_DOCSTRING
 )
 class RoFormerForCausalLM(RoFormerPreTrainedModel):
 
@@ -1069,7 +1072,8 @@ class RoFormerForCausalLM(RoFormerPreTrainedModel):
         self.roformer = RoFormerModel(config)
         self.cls = RoFormerOnlyMLMHead(config)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
     def get_output_embeddings(self):
         return self.cls.predictions.decoder
@@ -1097,45 +1101,46 @@ class RoFormerForCausalLM(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
+        encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
             Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention if
             the model is configured as a decoder.
-        encoder_attention_mask (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+        encoder_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used in
-            the cross-attention if the model is configured as a decoder. Mask values selected in ``[0, 1]``:
+            the cross-attention if the model is configured as a decoder. Mask values selected in `[0, 1]`:
 
             - 1 for tokens that are **not masked**,
             - 0 for tokens that are **masked**.
-        past_key_values (:obj:`tuple(tuple(torch.FloatTensor))` of length :obj:`config.n_layers` with each tuple having 4 tensors of shape :obj:`(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
+        past_key_values (`tuple(tuple(torch.FloatTensor))` of length `config.n_layers` with each tuple having 4 tensors of shape `(batch_size, num_heads, sequence_length - 1, embed_size_per_head)`):
             Contains precomputed key and value hidden states of the attention blocks. Can be used to speed up decoding.
-            If :obj:`past_key_values` are used, the user can optionally input only the last :obj:`decoder_input_ids`
-            (those that don't have their past key value states given to this model) of shape :obj:`(batch_size, 1)`
-            instead of all :obj:`decoder_input_ids` of shape :obj:`(batch_size, sequence_length)`.
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
+            If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those that
+            don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of all
+            `decoder_input_ids` of shape `(batch_size, sequence_length)`.
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
             Labels for computing the left-to-right language modeling loss (next word prediction). Indices should be in
-            ``[-100, 0, ..., config.vocab_size]`` (see ``input_ids`` docstring) Tokens with indices set to ``-100`` are
-            ignored (masked), the loss is only computed for the tokens with labels n ``[0, ..., config.vocab_size]``.
-        use_cache (:obj:`bool`, `optional`):
-            If set to :obj:`True`, :obj:`past_key_values` key value states are returned and can be used to speed up
-            decoding (see :obj:`past_key_values`).
+            `[-100, 0, ..., config.vocab_size]` (see `input_ids` docstring) Tokens with indices set to `-100` are
+            ignored (masked), the loss is only computed for the tokens with labels n `[0, ..., config.vocab_size]`.
+        use_cache (`bool`, *optional*):
+            If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
+            `past_key_values`).
 
         Returns:
 
-        Example::
+        Example:
 
-            >>> from transformers import RoFormerTokenizer, RoFormerForCausalLM, RoFormerConfig
-            >>> import torch
+        ```python
+        >>> from transformers import RoFormerTokenizer, RoFormerForCausalLM, RoFormerConfig
+        >>> import torch
 
-            >>> tokenizer = RoFormerTokenizer.from_pretrained('junnyu/roformer_chinese_base')
-            >>> config = RoFormerConfig.from_pretrained("junnyu/roformer_chinese_base")
-            >>> config.is_decoder = True
-            >>> model = RoFormerForCausalLM.from_pretrained('junnyu/roformer_chinese_base', config=config)
+        >>> tokenizer = RoFormerTokenizer.from_pretrained("junnyu/roformer_chinese_base")
+        >>> config = RoFormerConfig.from_pretrained("junnyu/roformer_chinese_base")
+        >>> config.is_decoder = True
+        >>> model = RoFormerForCausalLM.from_pretrained("junnyu/roformer_chinese_base", config=config)
 
-            >>> inputs = tokenizer("今天天气非常好。", return_tensors="pt")
-            >>> outputs = model(**inputs)
+        >>> inputs = tokenizer("今天天气非常好。", return_tensors="pt")
+        >>> outputs = model(**inputs)
 
-            >>> prediction_logits = outputs.logits
-        """
+        >>> prediction_logits = outputs.logits
+        ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.roformer(
@@ -1234,11 +1239,12 @@ class RoFormerForSequenceClassification(RoFormerPreTrainedModel):
         self.roformer = RoFormerModel(config)
         self.classifier = RoFormerClassificationHead(config)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
     @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=SequenceClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1256,10 +1262,10 @@ class RoFormerForSequenceClassification(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
-            Labels for computing the sequence classification/regression loss. Indices should be in :obj:`[0, ...,
-            config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
-            If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the sequence classification/regression loss. Indices should be in `[0, ...,
+            config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed (Mean-Square loss), If
+            `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1279,14 +1285,26 @@ class RoFormerForSequenceClassification(RoFormerPreTrainedModel):
 
         loss = None
         if labels is not None:
-            if self.num_labels == 1:
-                #  We are doing regression
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
+
+            if self.config.problem_type == "regression":
                 loss_fct = MSELoss()
-                loss = loss_fct(logits.view(-1), labels.view(-1))
-            else:
+                if self.num_labels == 1:
+                    loss = loss_fct(logits.squeeze(), labels.squeeze())
+                else:
+                    loss = loss_fct(logits, labels)
+            elif self.config.problem_type == "single_label_classification":
                 loss_fct = CrossEntropyLoss()
                 loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
-
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
         if not return_dict:
             output = (logits,) + outputs[1:]
             return ((loss,) + output) if loss is not None else output
@@ -1314,13 +1332,14 @@ class RoFormerForMultipleChoice(RoFormerPreTrainedModel):
         self.sequence_summary = SequenceSummary(config)
         self.classifier = nn.Linear(config.hidden_size, 1)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
     @add_start_docstrings_to_model_forward(
         ROFORMER_INPUTS_DOCSTRING.format("batch_size, num_choices, sequence_length")
     )
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=MultipleChoiceModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1338,10 +1357,10 @@ class RoFormerForMultipleChoice(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
-            Labels for computing the multiple choice classification loss. Indices should be in ``[0, ...,
-            num_choices-1]`` where :obj:`num_choices` is the size of the second dimension of the input tensors. (See
-            :obj:`input_ids` above)
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the multiple choice classification loss. Indices should be in `[0, ...,
+            num_choices-1]` where `num_choices` is the size of the second dimension of the input tensors. (See
+            `input_ids` above)
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         num_choices = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
@@ -1406,11 +1425,12 @@ class RoFormerForTokenClassification(RoFormerPreTrainedModel):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
-    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"))
+    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=TokenClassifierOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1428,9 +1448,8 @@ class RoFormerForTokenClassification(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        labels (:obj:`torch.LongTensor` of shape :obj:`(batch_size, sequence_length)`, `optional`):
-            Labels for computing the token classification loss. Indices should be in ``[0, ..., config.num_labels -
-            1]``.
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for computing the token classification loss. Indices should be in `[0, ..., config.num_labels - 1]`.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1453,16 +1472,7 @@ class RoFormerForTokenClassification(RoFormerPreTrainedModel):
         loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()
-            # Only keep active parts of the loss
-            if attention_mask is not None:
-                active_loss = attention_mask.view(-1) == 1
-                active_logits = logits.view(-1, self.num_labels)
-                active_labels = torch.where(
-                    active_loss, labels.view(-1), torch.tensor(loss_fct.ignore_index).type_as(labels)
-                )
-                loss = loss_fct(active_logits, active_labels)
-            else:
-                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -1493,11 +1503,12 @@ class RoFormerForQuestionAnswering(RoFormerPreTrainedModel):
         self.roformer = RoFormerModel(config)
         self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
 
-        self.init_weights()
+        # Initialize weights and apply final processing
+        self.post_init()
 
-    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("(batch_size, sequence_length)"))
+    @add_start_docstrings_to_model_forward(ROFORMER_INPUTS_DOCSTRING.format("batch_size, sequence_length"))
     @add_code_sample_docstrings(
-        tokenizer_class=_TOKENIZER_FOR_DOC,
+        processor_class=_TOKENIZER_FOR_DOC,
         checkpoint=_CHECKPOINT_FOR_DOC,
         output_type=QuestionAnsweringModelOutput,
         config_class=_CONFIG_FOR_DOC,
@@ -1516,14 +1527,14 @@ class RoFormerForQuestionAnswering(RoFormerPreTrainedModel):
         return_dict=None,
     ):
         r"""
-        start_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+        start_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for position (index) of the start of the labelled span for computing the token classification loss.
-            Positions are clamped to the length of the sequence (:obj:`sequence_length`). Position outside of the
-            sequence are not taken into account for computing the loss.
-        end_positions (:obj:`torch.LongTensor` of shape :obj:`(batch_size,)`, `optional`):
+            Positions are clamped to the length of the sequence (`sequence_length`). Position outside of the sequence
+            are not taken into account for computing the loss.
+        end_positions (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
             Labels for position (index) of the end of the labelled span for computing the token classification loss.
-            Positions are clamped to the length of the sequence (:obj:`sequence_length`). Position outside of the
-            sequence are not taken into account for computing the loss.
+            Positions are clamped to the length of the sequence (`sequence_length`). Position outside of the sequence
+            are not taken into account for computing the loss.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1554,8 +1565,8 @@ class RoFormerForQuestionAnswering(RoFormerPreTrainedModel):
                 end_positions = end_positions.squeeze(-1)
             # sometimes the start/end positions are outside our model inputs, we ignore these terms
             ignored_index = start_logits.size(1)
-            start_positions.clamp_(0, ignored_index)
-            end_positions.clamp_(0, ignored_index)
+            start_positions = start_positions.clamp(0, ignored_index)
+            end_positions = end_positions.clamp(0, ignored_index)
 
             loss_fct = CrossEntropyLoss(ignore_index=ignored_index)
             start_loss = loss_fct(start_logits, start_positions)

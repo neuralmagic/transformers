@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import requests
-from huggingface_hub import HfApi
+import yaml
+from huggingface_hub import model_info
 
 from . import __version__
 from .file_utils import (
@@ -37,12 +38,40 @@ from .file_utils import (
     is_datasets_available,
     is_offline_mode,
     is_remote_url,
+    is_tf_available,
     is_tokenizers_available,
     is_torch_available,
+)
+from .models.auto.modeling_auto import (
+    MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING_NAMES,
+    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES,
+    MODEL_FOR_IMAGE_SEGMENTATION_MAPPING_NAMES,
+    MODEL_FOR_MASKED_LM_MAPPING_NAMES,
+    MODEL_FOR_OBJECT_DETECTION_MAPPING_NAMES,
+    MODEL_FOR_QUESTION_ANSWERING_MAPPING_NAMES,
+    MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES,
+    MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES,
+    MODEL_FOR_TABLE_QUESTION_ANSWERING_MAPPING_NAMES,
+    MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING_NAMES,
 )
 from .training_args import ParallelMode
 from .utils import logging
 
+
+TASK_MAPPING = {
+    "text-generation": MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+    "image-classification": MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES,
+    "image-segmentation": MODEL_FOR_IMAGE_SEGMENTATION_MAPPING_NAMES,
+    "fill-mask": MODEL_FOR_MASKED_LM_MAPPING_NAMES,
+    "object-detection": MODEL_FOR_OBJECT_DETECTION_MAPPING_NAMES,
+    "question-answering": MODEL_FOR_QUESTION_ANSWERING_MAPPING_NAMES,
+    "text2text-generation": MODEL_FOR_SEQ_TO_SEQ_CAUSAL_LM_MAPPING_NAMES,
+    "text-classification": MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES,
+    "table-question-answering": MODEL_FOR_TABLE_QUESTION_ANSWERING_MAPPING_NAMES,
+    "token-classification": MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING_NAMES,
+    "audio-classification": MODEL_FOR_AUDIO_CLASSIFICATION_MAPPING_NAMES,
+}
 
 logger = logging.get_logger(__name__)
 
@@ -97,53 +126,57 @@ class ModelCard:
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         r"""
-        Instantiate a :class:`~transformers.ModelCard` from a pre-trained model model card.
+        Instantiate a [`ModelCard`] from a pre-trained model model card.
 
         Parameters:
             pretrained_model_name_or_path: either:
 
-                - a string, the `model id` of a pretrained model card hosted inside a model repo on huggingface.co.
-                  Valid model ids can be located at the root-level, like ``bert-base-uncased``, or namespaced under a
-                  user or organization name, like ``dbmdz/bert-base-german-cased``.
-                - a path to a `directory` containing a model card file saved using the
-                  :func:`~transformers.ModelCard.save_pretrained` method, e.g.: ``./my_model_directory/``.
-                - a path or url to a saved model card JSON `file`, e.g.: ``./my_model_directory/modelcard.json``.
+                - a string, the *model id* of a pretrained model card hosted inside a model repo on huggingface.co.
+                  Valid model ids can be located at the root-level, like `bert-base-uncased`, or namespaced under a
+                  user or organization name, like `dbmdz/bert-base-german-cased`.
+                - a path to a *directory* containing a model card file saved using the [`~ModelCard.save_pretrained`]
+                  method, e.g.: `./my_model_directory/`.
+                - a path or url to a saved model card JSON *file*, e.g.: `./my_model_directory/modelcard.json`.
 
-            cache_dir: (`optional`) string:
+            cache_dir: (*optional*) string:
                 Path to a directory in which a downloaded pre-trained model card should be cached if the standard cache
                 should not be used.
 
-            kwargs: (`optional`) dict: key/value pairs with which to update the ModelCard object after loading.
+            kwargs: (*optional*) dict: key/value pairs with which to update the ModelCard object after loading.
 
                 - The values in kwargs of any keys which are model card attributes will be used to override the loaded
                   values.
                 - Behavior concerning key/value pairs whose keys are *not* model card attributes is controlled by the
-                  `return_unused_kwargs` keyword parameter.
+                  *return_unused_kwargs* keyword parameter.
 
-            proxies: (`optional`) dict, default None:
+            proxies: (*optional*) dict, default None:
                 A dictionary of proxy servers to use by protocol or endpoint, e.g.: {'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}. The proxies are used on each request.
 
-            find_from_standard_name: (`optional`) boolean, default True:
+            find_from_standard_name: (*optional*) boolean, default True:
                 If the pretrained_model_name_or_path ends with our standard model or config filenames, replace them
                 with our standard modelcard filename. Can be used to directly feed a model/config url and access the
                 colocated modelcard.
 
-            return_unused_kwargs: (`optional`) bool:
+            return_unused_kwargs: (*optional*) bool:
 
                 - If False, then this function returns just the final model card object.
-                - If True, then this functions returns a tuple `(model card, unused_kwargs)` where `unused_kwargs` is a
+                - If True, then this functions returns a tuple *(model card, unused_kwargs)* where *unused_kwargs* is a
                   dictionary consisting of the key/value pairs whose keys are not model card attributes: ie the part of
-                  kwargs which has not been used to update `ModelCard` and is otherwise ignored.
+                  kwargs which has not been used to update *ModelCard* and is otherwise ignored.
 
-        Examples::
+        Examples:
 
-            modelcard = ModelCard.from_pretrained('bert-base-uncased')    # Download model card from huggingface.co and cache.
-            modelcard = ModelCard.from_pretrained('./test/saved_model/')  # E.g. model card was saved using `save_pretrained('./test/saved_model/')`
-            modelcard = ModelCard.from_pretrained('./test/saved_model/modelcard.json')
-            modelcard = ModelCard.from_pretrained('bert-base-uncased', output_attentions=True, foo=False)
-
-        """
+        ```python
+        modelcard = ModelCard.from_pretrained(
+            "bert-base-uncased"
+        )  # Download model card from huggingface.co and cache.
+        modelcard = ModelCard.from_pretrained(
+            "./test/saved_model/"
+        )  # E.g. model card was saved using *save_pretrained('./test/saved_model/')*
+        modelcard = ModelCard.from_pretrained("./test/saved_model/modelcard.json")
+        modelcard = ModelCard.from_pretrained("bert-base-uncased", output_attentions=True, foo=False)
+        ```"""
         # This imports every model so let's do it dynamically here.
         from transformers.models.auto.configuration_auto import ALL_PRETRAINED_CONFIG_ARCHIVE_MAP
 
@@ -238,17 +271,26 @@ class ModelCard:
             writer.write(self.to_json_string())
 
 
-AUTOGENERATED_COMMENT = """
+AUTOGENERATED_TRAINER_COMMENT = """
 <!-- This model card has been generated automatically according to the information the Trainer had access to. You
 should probably proofread and complete it, then remove this comment. -->
+"""
+
+AUTOGENERATED_KERAS_COMMENT = """
+<!-- This model card has been generated automatically according to the information Keras had access to. You should
+probably proofread and complete it, then remove this comment. -->
 """
 
 
 TASK_TAG_TO_NAME_MAPPING = {
     "fill-mask": "Masked Language Modeling",
+    "image-classification": "Image Classification",
+    "image-segmentation": "Image Segmentation",
     "multiple-choice": "Multiple Choice",
+    "object-detection": "Object Detection",
     "question-answering": "Question Answering",
     "summarization": "Summarization",
+    "table-question-answering": "Table Question Answering",
     "text-classification": "Text Classification",
     "text-generation": "Causal Language Modeling",
     "text2text-generation": "Sequence-to-sequence Language Modeling",
@@ -281,15 +323,16 @@ def _listify(obj):
         return obj
 
 
-def _list_possibilities(name, tags):
-    if tags is None:
-        return ""
-    if isinstance(tags, str):
-        tags = [tags]
-    if len(tags) == 0:
-        return ""
-    name_tags = [f"- {tag}" for tag in tags]
-    return f"{name}:\n" + "\n".join(name_tags) + "\n"
+def _insert_values_as_list(metadata, name, values):
+    if values is None:
+        return metadata
+    if isinstance(values, str):
+        values = [values]
+    values = [v for v in values if v is not None]
+    if len(values) == 0:
+        return metadata
+    metadata[name] = values
+    return metadata
 
 
 def infer_metric_tags_from_eval_results(eval_results):
@@ -304,6 +347,32 @@ def infer_metric_tags_from_eval_results(eval_results):
     return result
 
 
+def _insert_value(metadata, name, value):
+    if value is None:
+        return metadata
+    metadata[name] = value
+    return metadata
+
+
+def is_hf_dataset(dataset):
+    if not is_datasets_available():
+        return False
+
+    from datasets import Dataset
+
+    return isinstance(dataset, Dataset)
+
+
+def _get_mapping_values(mapping):
+    result = []
+    for v in mapping.values():
+        if isinstance(v, (tuple, list)):
+            result += list(v)
+        else:
+            result.append(v)
+    return result
+
+
 @dataclass
 class TrainingSummary:
     model_name: str
@@ -311,26 +380,33 @@ class TrainingSummary:
     license: Optional[str] = None
     tags: Optional[Union[str, List[str]]] = None
     finetuned_from: Optional[str] = None
+    tasks: Optional[Union[str, List[str]]] = None
     dataset: Optional[Union[str, List[str]]] = None
     dataset_tags: Optional[Union[str, List[str]]] = None
     dataset_args: Optional[Union[str, List[str]]] = None
     eval_results: Optional[Dict[str, float]] = None
     eval_lines: Optional[List[str]] = None
     hyperparameters: Optional[Dict[str, Any]] = None
+    source: Optional[str] = "trainer"
 
     def __post_init__(self):
         # Infer default license from the checkpoint used, if possible.
-        if self.license is None and not is_offline_mode() and self.finetuned_from is not None:
+        if (
+            self.license is None
+            and not is_offline_mode()
+            and self.finetuned_from is not None
+            and len(self.finetuned_from) > 0
+        ):
             try:
-                model_info = HfApi().model_info(self.finetuned_from)
-                for tag in model_info.tags:
+                info = model_info(self.finetuned_from)
+                for tag in info.tags:
                     if tag.startswith("license:"):
                         self.license = tag[8:]
             except requests.exceptions.HTTPError:
                 pass
 
     def create_model_index(self, metric_mapping):
-        model_index = f"model-index:\n- name: {self.model_name}\n"
+        model_index = {"name": self.model_name}
 
         # Dataset mapping tag -> name
         dataset_names = _listify(self.dataset)
@@ -342,56 +418,74 @@ class TrainingSummary:
         dataset_arg_mapping = {tag: arg for tag, arg in zip(dataset_tags, dataset_args)}
 
         task_mapping = {
-            tag: TASK_TAG_TO_NAME_MAPPING[tag] for tag in _listify(self.tags) if tag in TASK_TAG_TO_NAME_MAPPING
+            task: TASK_TAG_TO_NAME_MAPPING[task] for task in _listify(self.tasks) if task in TASK_TAG_TO_NAME_MAPPING
         }
 
+        model_index["results"] = []
+
         if len(task_mapping) == 0 and len(dataset_mapping) == 0:
-            return model_index
+            return [model_index]
         if len(task_mapping) == 0:
             task_mapping = {None: None}
         if len(dataset_mapping) == 0:
             dataset_mapping = {None: None}
+
+        # One entry per dataset and per task
         all_possibilities = [(task_tag, ds_tag) for task_tag in task_mapping for ds_tag in dataset_mapping]
-
-        model_index += "  results:\n"
         for task_tag, ds_tag in all_possibilities:
-            result = ""
+            result = {}
             if task_tag is not None:
-                result += f"  - task:\n      name: {task_mapping[task_tag]}\n      type: {task_tag}\n"
+                result["task"] = {"name": task_mapping[task_tag], "type": task_tag}
+
             if ds_tag is not None:
-                prefix = "  - " if task_tag is None else "    "
-                result += f"{prefix}dataset:\n      name: {dataset_mapping[ds_tag]}\n      type: {ds_tag}\n"
+                result["dataset"] = {"name": dataset_mapping[ds_tag], "type": ds_tag}
                 if dataset_arg_mapping[ds_tag] is not None:
-                    result += f"      args: {dataset_arg_mapping[ds_tag]}\n"
+                    result["dataset"]["args"] = dataset_arg_mapping[ds_tag]
+
             if len(metric_mapping) > 0:
-                result += "    metrics:\n"
+                result["metrics"] = []
                 for metric_tag, metric_name in metric_mapping.items():
-                    value = self.eval_results[metric_name]
-                    result += f"      - name: {metric_name}\n        type: {metric_tag}\n        value: {value}\n"
+                    result["metrics"].append(
+                        {
+                            "name": metric_name,
+                            "type": metric_tag,
+                            "value": self.eval_results[metric_name],
+                        }
+                    )
 
-            model_index += result
+            # Remove partial results to avoid the model card being rejected.
+            if "task" in result and "dataset" in result and "metrics" in result:
+                model_index["results"].append(result)
+            else:
+                logger.info(f"Dropping the following result as it does not have all the necessary fields:\n{result}")
 
-        return model_index
+        return [model_index]
+
+    def create_metadata(self):
+        metric_mapping = infer_metric_tags_from_eval_results(self.eval_results)
+
+        metadata = {}
+        metadata = _insert_values_as_list(metadata, "language", self.language)
+        metadata = _insert_value(metadata, "license", self.license)
+        metadata = _insert_values_as_list(metadata, "tags", self.tags)
+        metadata = _insert_values_as_list(metadata, "datasets", self.dataset_tags)
+        metadata = _insert_values_as_list(metadata, "metrics", list(metric_mapping.keys()))
+        metadata["model-index"] = self.create_model_index(metric_mapping)
+
+        return metadata
 
     def to_model_card(self):
         model_card = ""
 
-        metric_mapping = infer_metric_tags_from_eval_results(self.eval_results)
-
-        # Metadata
-        metadata = ""
-        metadata += _list_possibilities("language", self.language)
-        if self.license is not None:
-            metadata += f"license: {self.license}\n"
-        metadata += _list_possibilities("tags", self.tags)
-        metadata += _list_possibilities("datasets", self.dataset_tags)
-        metadata += _list_possibilities("metrics", list(metric_mapping.keys()))
-        metadata += "\n" + self.create_model_index(metric_mapping)
+        metadata = yaml.dump(self.create_metadata(), sort_keys=False)
         if len(metadata) > 0:
             model_card = f"---\n{metadata}---\n"
 
         # Now the model card for realsies.
-        model_card += AUTOGENERATED_COMMENT
+        if self.source == "trainer":
+            model_card += AUTOGENERATED_TRAINER_COMMENT
+        else:
+            model_card += AUTOGENERATED_KERAS_COMMENT
 
         model_card += f"\n# {self.model_name}\n\n"
 
@@ -401,10 +495,12 @@ class TrainingSummary:
             model_card += f"This model is a fine-tuned version of [{self.finetuned_from}](https://huggingface.co/{self.finetuned_from}) on "
 
         if self.dataset is None:
-            model_card += "an unkown dataset."
+            model_card += "an unknown dataset."
         else:
             if isinstance(self.dataset, str):
                 model_card += f"the {self.dataset} dataset."
+            elif isinstance(self.dataset, (tuple, list)) and len(self.dataset) == 1:
+                model_card += f"the {self.dataset[0]} dataset."
             else:
                 model_card += (
                     ", ".join([f"the {ds}" for ds in self.dataset[:-1]]) + f" and the {self.dataset[-1]} datasets."
@@ -435,10 +531,15 @@ class TrainingSummary:
 
         model_card += "\n### Framework versions\n\n"
         model_card += f"- Transformers {__version__}\n"
-        if is_torch_available():
+
+        if self.source == "trainer" and is_torch_available():
             import torch
 
             model_card += f"- Pytorch {torch.__version__}\n"
+        elif self.source == "keras" and is_tf_available():
+            import tensorflow as tf
+
+            model_card += f"- TensorFlow {tf.__version__}\n"
         if is_datasets_available():
             import datasets
 
@@ -459,13 +560,50 @@ class TrainingSummary:
         tags=None,
         model_name=None,
         finetuned_from=None,
+        tasks=None,
         dataset_tags=None,
         dataset=None,
         dataset_args=None,
     ):
-        # TODO (Sylvain) Add a default for `pipeline-tag` inferred from the model.
+        # Infer default from dataset
+        one_dataset = trainer.train_dataset if trainer.train_dataset is not None else trainer.eval_dataset
+        if is_hf_dataset(one_dataset) and (dataset_tags is None or dataset_args is None):
+            default_tag = one_dataset.builder_name
+            # Those are not real datasets from the Hub so we exclude them.
+            if default_tag not in ["csv", "json", "pandas", "parquet", "text"]:
+                if dataset_tags is None:
+                    dataset_tags = [default_tag]
+                if dataset_args is None:
+                    dataset_args = [one_dataset.config_name]
+
+        if dataset is None and dataset_tags is not None:
+            dataset = dataset_tags
+
+        # Infer default finetuned_from
+        if (
+            finetuned_from is None
+            and hasattr(trainer.model.config, "_name_or_path")
+            and not os.path.isdir(trainer.model.config._name_or_path)
+        ):
+            finetuned_from = trainer.model.config._name_or_path
+
+        # Infer default task tag:
+        if tasks is None:
+            model_class_name = trainer.model.__class__.__name__
+            for task, mapping in TASK_MAPPING.items():
+                if model_class_name in _get_mapping_values(mapping):
+                    tasks = task
+
         if model_name is None:
             model_name = Path(trainer.args.output_dir).name
+
+        # Add `generated_from_trainer` to the tags
+        if tags is None:
+            tags = ["generated_from_trainer"]
+        elif isinstance(tags, str) and tags != "generated_from_trainer":
+            tags = [tags, "generated_from_trainer"]
+        elif "generated_from_trainer" not in tags:
+            tags.append("generated_from_trainer")
 
         _, eval_lines, eval_results = parse_log_history(trainer.state.log_history)
         hyperparameters = extract_hyperparameters_from_trainer(trainer)
@@ -476,6 +614,7 @@ class TrainingSummary:
             tags=tags,
             model_name=model_name,
             finetuned_from=finetuned_from,
+            tasks=tasks,
             dataset_tags=dataset_tags,
             dataset=dataset,
             dataset_args=dataset_args,
@@ -483,6 +622,116 @@ class TrainingSummary:
             eval_lines=eval_lines,
             hyperparameters=hyperparameters,
         )
+
+    @classmethod
+    def from_keras(
+        cls,
+        model,
+        model_name,
+        keras_history=None,
+        language=None,
+        license=None,
+        tags=None,
+        finetuned_from=None,
+        tasks=None,
+        dataset_tags=None,
+        dataset=None,
+        dataset_args=None,
+    ):
+        # Infer default from dataset
+        if dataset is not None:
+            if is_hf_dataset(dataset) and (dataset_tags is None or dataset_args is None):
+                default_tag = dataset.builder_name
+                # Those are not real datasets from the Hub so we exclude them.
+                if default_tag not in ["csv", "json", "pandas", "parquet", "text"]:
+                    if dataset_tags is None:
+                        dataset_tags = [default_tag]
+                    if dataset_args is None:
+                        dataset_args = [dataset.config_name]
+
+        if dataset is None and dataset_tags is not None:
+            dataset = dataset_tags
+
+        # Infer default finetuned_from
+        if (
+            finetuned_from is None
+            and hasattr(model.config, "_name_or_path")
+            and not os.path.isdir(model.config._name_or_path)
+        ):
+            finetuned_from = model.config._name_or_path
+
+        # Infer default task tag:
+        if tasks is None:
+            model_class_name = model.__class__.__name__
+            for task, mapping in TASK_MAPPING.items():
+                if model_class_name in _get_mapping_values(mapping):
+                    tasks = task
+
+        # Add `generated_from_keras_callback` to the tags
+        if tags is None:
+            tags = ["generated_from_keras_callback"]
+        elif isinstance(tags, str) and tags != "generated_from_keras_callback":
+            tags = [tags, "generated_from_keras_callback"]
+        elif "generated_from_keras_callback" not in tags:
+            tags.append("generated_from_keras_callback")
+
+        if keras_history is not None:
+            _, eval_lines, eval_results = parse_keras_history(keras_history)
+        else:
+            eval_lines = []
+            eval_results = dict()
+        hyperparameters = extract_hyperparameters_from_keras(model)
+
+        return cls(
+            language=language,
+            license=license,
+            tags=tags,
+            model_name=model_name,
+            finetuned_from=finetuned_from,
+            tasks=tasks,
+            dataset_tags=dataset_tags,
+            dataset=dataset,
+            dataset_args=dataset_args,
+            eval_results=eval_results,
+            eval_lines=eval_lines,
+            hyperparameters=hyperparameters,
+            source="keras",
+        )
+
+
+def parse_keras_history(logs):
+    """
+    Parse the `logs` of either a `tf.keras.History` object returned by `model.fit()` or an accumulated logs `dict`
+    passed to the `PushToHubCallback`. Returns lines and logs compatible with those returned by `parse_log_history`.
+    """
+    if hasattr(logs, "history"):
+        # This looks like a `History` object
+        if not hasattr(logs, "epoch"):
+            # This history looks empty, return empty results
+            return None, [], dict()
+        logs.history["epoch"] = logs.epoch
+        logs = logs.history
+    else:
+        # Training logs is a list of dicts, let's invert it to a dict of lists to match a History object
+        logs = {log_key: [single_dict[log_key] for single_dict in logs] for log_key in logs[0]}
+
+    lines = []
+    for i in range(len(logs["epoch"])):
+        epoch_dict = {log_key: log_value_list[i] for log_key, log_value_list in logs.items()}
+        values = dict()
+        for k, v in epoch_dict.items():
+            if k.startswith("val_"):
+                k = "validation_" + k[4:]
+            elif k != "epoch":
+                k = "train_" + k
+            splits = k.split("_")
+            name = " ".join([part.capitalize() for part in splits])
+            values[name] = v
+        lines.append(values)
+
+    eval_results = lines[-1]
+
+    return logs, lines, eval_results
 
 
 def parse_log_history(log_history):
@@ -544,6 +793,19 @@ def parse_log_history(log_history):
         return train_log, lines, eval_results
     else:
         return train_log, lines, None
+
+
+def extract_hyperparameters_from_keras(model):
+    import tensorflow as tf
+
+    hyperparameters = dict()
+    if hasattr(model, "optimizer") and model.optimizer is not None:
+        hyperparameters["optimizer"] = model.optimizer.get_config()
+    else:
+        hyperparameters["optimizer"] = None
+    hyperparameters["training_precision"] = tf.keras.mixed_precision.global_policy().name
+
+    return hyperparameters
 
 
 def _maybe_round(v, decimals=4):
@@ -630,7 +892,7 @@ def extract_hyperparameters_from_trainer(trainer):
     if trainer.args.fp16:
         if trainer.use_amp:
             hyperparameters["mixed_precision_training"] = "Native AMP"
-        elif trainer._use_apex:
+        elif trainer.use_apex:
             hyperparameters["mixed_precision_training"] = f"Apex, opt level {trainer.args.fp16_opt_level}"
 
     if trainer.args.label_smoothing_factor != 0.0:

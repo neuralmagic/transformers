@@ -93,14 +93,20 @@ class AddNewModelCommand(BaseTransformersCLICommand):
             configuration = json.load(configuration_file)
 
         lowercase_model_name = configuration["lowercase_modelname"]
-        pytorch_or_tensorflow = configuration["generate_tensorflow_and_pytorch"]
+        generate_tensorflow_pytorch_and_flax = configuration["generate_tensorflow_pytorch_and_flax"]
         os.remove(f"{directory}/configuration.json")
 
-        output_pytorch = "PyTorch" in pytorch_or_tensorflow
-        output_tensorflow = "TensorFlow" in pytorch_or_tensorflow
+        output_pytorch = "PyTorch" in generate_tensorflow_pytorch_and_flax
+        output_tensorflow = "TensorFlow" in generate_tensorflow_pytorch_and_flax
+        output_flax = "Flax" in generate_tensorflow_pytorch_and_flax
 
         model_dir = f"{path_to_transformer_root}/src/transformers/models/{lowercase_model_name}"
         os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(f"{path_to_transformer_root}/tests/{lowercase_model_name}", exist_ok=True)
+
+        # Tests require submodules as they have parent imports
+        with open(f"{path_to_transformer_root}/tests/{lowercase_model_name}/__init__.py", "w"):
+            pass
 
         shutil.move(
             f"{directory}/__init__.py",
@@ -130,7 +136,7 @@ class AddNewModelCommand(BaseTransformersCLICommand):
 
             shutil.move(
                 f"{directory}/test_modeling_{lowercase_model_name}.py",
-                f"{path_to_transformer_root}/tests/test_modeling_{lowercase_model_name}.py",
+                f"{path_to_transformer_root}/tests/{lowercase_model_name}/test_modeling_{lowercase_model_name}.py",
             )
         else:
             os.remove(f"{directory}/modeling_{lowercase_model_name}.py")
@@ -147,15 +153,32 @@ class AddNewModelCommand(BaseTransformersCLICommand):
 
             shutil.move(
                 f"{directory}/test_modeling_tf_{lowercase_model_name}.py",
-                f"{path_to_transformer_root}/tests/test_modeling_tf_{lowercase_model_name}.py",
+                f"{path_to_transformer_root}/tests/{lowercase_model_name}/test_modeling_tf_{lowercase_model_name}.py",
             )
         else:
             os.remove(f"{directory}/modeling_tf_{lowercase_model_name}.py")
             os.remove(f"{directory}/test_modeling_tf_{lowercase_model_name}.py")
 
+        if output_flax:
+            if not self._testing:
+                remove_copy_lines(f"{directory}/modeling_flax_{lowercase_model_name}.py")
+
+            shutil.move(
+                f"{directory}/modeling_flax_{lowercase_model_name}.py",
+                f"{model_dir}/modeling_flax_{lowercase_model_name}.py",
+            )
+
+            shutil.move(
+                f"{directory}/test_modeling_flax_{lowercase_model_name}.py",
+                f"{path_to_transformer_root}/tests/{lowercase_model_name}/test_modeling_flax_{lowercase_model_name}.py",
+            )
+        else:
+            os.remove(f"{directory}/modeling_flax_{lowercase_model_name}.py")
+            os.remove(f"{directory}/test_modeling_flax_{lowercase_model_name}.py")
+
         shutil.move(
-            f"{directory}/{lowercase_model_name}.rst",
-            f"{path_to_transformer_root}/docs/source/model_doc/{lowercase_model_name}.rst",
+            f"{directory}/{lowercase_model_name}.mdx",
+            f"{path_to_transformer_root}/docs/source/model_doc/{lowercase_model_name}.mdx",
         )
 
         shutil.move(
@@ -196,8 +219,10 @@ class AddNewModelCommand(BaseTransformersCLICommand):
             move(abs_path, original_file)
 
         def skip_units(line):
-            return ("generating PyTorch" in line and not output_pytorch) or (
-                "generating TensorFlow" in line and not output_tensorflow
+            return (
+                ("generating PyTorch" in line and not output_pytorch)
+                or ("generating TensorFlow" in line and not output_tensorflow)
+                or ("generating Flax" in line and not output_flax)
             )
 
         def replace_in_files(path_to_datafile):

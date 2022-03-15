@@ -17,7 +17,7 @@
 Fine-tuning the library models for masked language modeling (BERT, ALBERT, RoBERTa...) on a text file or a dataset.
 
 Here is the full list of checkpoints on the hub that can be fine-tuned by this script:
-https://huggingface.co/models?filter=masked-lm
+https://huggingface.co/models?filter=fill-mask
 """
 # You can also adapt this script on your own masked language modeling task. Pointers for this are left as comments.
 
@@ -26,13 +26,13 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Optional
 
-import numpy
-from datasets import concatenate_datasets, load_dataset
+import datasets
+from datasets import load_dataset, load_metric
 
 import transformers
-from sparseml_utils import MaskedLanguageModelingModuleExporter, SparseMLMaskedLanguageModelingTrainer
 from transformers import (
     CONFIG_MAPPING,
     MODEL_FOR_MASKED_LM_MAPPING,
@@ -41,16 +41,20 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     HfArgumentParser,
+    Trainer,
     TrainingArguments,
+    is_torch_tpu_available,
     set_seed,
 )
-from transformers.sparse import export_model, load_recipe
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.7.0.dev0")
+check_min_version("4.18.0.dev0")
+
+require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
 
 logger = logging.getLogger(__name__)
 MODEL_CONFIG_CLASSES = list(MODEL_FOR_MASKED_LM_MAPPING.keys())
@@ -74,8 +78,12 @@ class ModelArguments:
         default=None,
         metadata={"help": "If training from scratch, pass a model type from the list: " + ", ".join(MODEL_TYPES)},
     )
-    distill_teacher: Optional[str] = field(
-        default=None, metadata={"help": "Teacher model which needs to be a trained QA model"}
+    config_overrides: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Override some existing default config settings when a model is trained from scratch. Example: "
+            "n_embd=10,resid_pdrop=0.2,scale_attn_weights=false,summary_type=cls_index"
+        },
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -103,6 +111,12 @@ class ModelArguments:
         },
     )
 
+    def __post_init__(self):
+        if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
+            raise ValueError(
+                "--config_overrides can't be used in combination with --config_name or --model_name_or_path"
+            )
+
 
 @dataclass
 class DataTrainingArguments:
@@ -110,40 +124,12 @@ class DataTrainingArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-    recipe: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Path to a SparseML sparsification recipe, see https://github.com/neuralmagic/sparseml "
-            "for more information"
-        },
-    )
-    recipe_args: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "Recipe arguments to be overwritten"
-        },
-    )
-    onnx_export_path: Optional[str] = field(
-        default=None, metadata={"help": "The filename and path which will be where onnx model is outputed"}
-    )
-    num_exported_samples: Optional[int] = field(
-        default=20, metadata={"help": "Number of exported samples, default to 20"}
-    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
-
-    # An extra second dataset
-    dataset_name_2: Optional[str] = field(
-        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
-    )
-    dataset_config_name_2: Optional[str] = field(
-        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
-    )
-
     train_file: Optional[str] = field(default=None, metadata={"help": "The input training data file (a text file)."})
     validation_file: Optional[str] = field(
         default=None,
@@ -204,10 +190,12 @@ class DataTrainingArguments:
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
-                assert extension in ["csv", "json", "txt"], "`train_file` should be a csv, a json or a txt file."
+                if extension not in ["csv", "json", "txt"]:
+                    raise ValueError("`train_file` should be a csv, a json or a txt file.")
             if self.validation_file is not None:
                 extension = self.validation_file.split(".")[-1]
-                assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, a json or a txt file."
+                if extension not in ["csv", "json", "txt"]:
+                    raise ValueError("`validation_file` should be a csv, a json or a txt file.")
 
 
 def main():
@@ -222,6 +210,28 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.set_verbosity(log_level)
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    # Log on each process the small summary:
+    logger.warning(
+        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
+        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
+    )
+    # Set the verbosity to info of the Transformers logger (on main process only):
+    logger.info(f"Training/evaluation parameters {training_args}")
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -238,26 +248,6 @@ def main():
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
             )
 
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-    logger.setLevel(logging.INFO if training_args.should_log else logging.WARN)
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
-        + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
-    )
-    # Set the verbosity to info of the Transformers logger (on main process only):
-    if training_args.should_log:
-        transformers.utils.logging.set_verbosity_info()
-        transformers.utils.logging.enable_default_handler()
-        transformers.utils.logging.enable_explicit_format()
-    logger.info(f"Training/evaluation parameters {training_args}")
-
     # Set seed before initializing model.
     set_seed(training_args.seed)
 
@@ -272,15 +262,17 @@ def main():
     # download the dataset.
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        datasets = load_dataset(data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir)
-        if "validation" not in datasets.keys():
-            datasets["validation"] = load_dataset(
+        raw_datasets = load_dataset(
+            data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
+        )
+        if "validation" not in raw_datasets.keys():
+            raw_datasets["validation"] = load_dataset(
                 data_args.dataset_name,
                 data_args.dataset_config_name,
                 split=f"train[:{data_args.validation_split_percentage}%]",
                 cache_dir=model_args.cache_dir,
             )
-            datasets["train"] = load_dataset(
+            raw_datasets["train"] = load_dataset(
                 data_args.dataset_name,
                 data_args.dataset_config_name,
                 split=f"train[{data_args.validation_split_percentage}%:]",
@@ -290,38 +282,31 @@ def main():
         data_files = {}
         if data_args.train_file is not None:
             data_files["train"] = data_args.train_file
+            extension = data_args.train_file.split(".")[-1]
         if data_args.validation_file is not None:
             data_files["validation"] = data_args.validation_file
-        extension = data_args.train_file.split(".")[-1]
+            extension = data_args.validation_file.split(".")[-1]
         if extension == "txt":
             extension = "text"
-        datasets = load_dataset(extension, data_files=data_files, cache_dir=model_args.cache_dir)
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
+        raw_datasets = load_dataset(extension, data_files=data_files, cache_dir=model_args.cache_dir)
 
-    # Load extra dataset if specified, and concatenate with the original one
-    if data_args.dataset_name_2 is not None:
-        # Downloading and loading a dataset from the hub.
-        datasets_2 = load_dataset(
-            data_args.dataset_name_2, data_args.dataset_config_name_2, cache_dir=model_args.cache_dir
-        )
-        if "validation" not in datasets_2.keys():
-            datasets_2["validation"] = load_dataset(
-                data_args.dataset_name_2,
-                data_args.dataset_config_name_2,
+        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+        if "validation" not in raw_datasets.keys():
+            raw_datasets["validation"] = load_dataset(
+                extension,
+                data_files=data_files,
                 split=f"train[:{data_args.validation_split_percentage}%]",
                 cache_dir=model_args.cache_dir,
             )
-            datasets_2["train"] = load_dataset(
-                data_args.dataset_name_2,
-                data_args.dataset_config_name_2,
+            raw_datasets["train"] = load_dataset(
+                extension,
+                data_files=data_files,
                 split=f"train[{data_args.validation_split_percentage}%:]",
                 cache_dir=model_args.cache_dir,
             )
-        # Concatenate two datasets
-        if datasets is not None:
-            for split in ["validation", "train"]:
-                datasets[split] = concatenate_datasets([datasets[split], datasets_2[split]])
+
+    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
+    # https://huggingface.co/docs/datasets/loading_datasets.html.
 
     # Load pretrained model and tokenizer
     #
@@ -340,6 +325,10 @@ def main():
     else:
         config = CONFIG_MAPPING[model_args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
+        if model_args.config_overrides is not None:
+            logger.info(f"Overriding config: {model_args.config_overrides}")
+            config.update_from_string(model_args.config_overrides)
+            logger.info(f"New config: {config}")
 
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
@@ -356,6 +345,7 @@ def main():
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
+
     if model_args.model_name_or_path:
         model = AutoModelForMaskedLM.from_pretrained(
             model_args.model_name_or_path,
@@ -371,23 +361,12 @@ def main():
 
     model.resize_token_embeddings(len(tokenizer))
 
-    teacher_model = None
-    if model_args.distill_teacher is not None:
-        teacher_model = AutoModelForMaskedLM.from_pretrained(
-            model_args.distill_teacher,
-            from_tf=bool(".ckpt" in model_args.distill_teacher),
-            cache_dir=model_args.cache_dir,
-        )
-        teacher_model_parameters = filter(lambda p: p.requires_grad, teacher_model.parameters())
-        params = sum([numpy.prod(p.size()) for p in teacher_model_parameters])
-        logger.info("Teacher Model has %s parameters", params)
-
     # Preprocessing the datasets.
     # First we tokenize all the texts.
     if training_args.do_train:
-        column_names = datasets["train"].column_names
+        column_names = raw_datasets["train"].column_names
     else:
-        column_names = datasets["validation"].column_names
+        column_names = raw_datasets["validation"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     if data_args.max_seq_length is None:
@@ -412,9 +391,11 @@ def main():
 
         def tokenize_function(examples):
             # Remove empty lines
-            examples["text"] = [line for line in examples["text"] if len(line) > 0 and not line.isspace()]
+            examples[text_column_name] = [
+                line for line in examples[text_column_name] if len(line) > 0 and not line.isspace()
+            ]
             return tokenizer(
-                examples["text"],
+                examples[text_column_name],
                 padding=padding,
                 truncation=True,
                 max_length=max_seq_length,
@@ -423,13 +404,15 @@ def main():
                 return_special_tokens_mask=True,
             )
 
-        tokenized_datasets = datasets.map(
-            tokenize_function,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=[text_column_name],
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        with training_args.main_process_first(desc="dataset map tokenization"):
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=[text_column_name],
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on dataset line_by_line",
+            )
     else:
         # Otherwise, we tokenize every text, then concatenate them together before splitting them in smaller parts.
         # We use `return_special_tokens_mask=True` because DataCollatorForLanguageModeling (see below) is more
@@ -437,23 +420,26 @@ def main():
         def tokenize_function(examples):
             return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
 
-        tokenized_datasets = datasets.map(
-            tokenize_function,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+        with training_args.main_process_first(desc="dataset map tokenization"):
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="Running tokenizer on every text in dataset",
+            )
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of
         # max_seq_length.
         def group_texts(examples):
             # Concatenate all texts.
-            concatenated_examples = {k: sum(examples[k], []) for k in examples.keys()}
+            concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
             total_length = len(concatenated_examples[list(examples.keys())[0]])
             # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
             # customize this part to your needs.
-            total_length = (total_length // max_seq_length) * max_seq_length
+            if total_length >= max_seq_length:
+                total_length = (total_length // max_seq_length) * max_seq_length
             # Split by chunks of max_len.
             result = {
                 k: [t[i : i + max_seq_length] for i in range(0, total_length, max_seq_length)]
@@ -467,12 +453,15 @@ def main():
         #
         # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
         # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
-        tokenized_datasets = tokenized_datasets.map(
-            group_texts,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
-        )
+
+        with training_args.main_process_first(desc="grouping texts together"):
+            tokenized_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+                num_proc=data_args.preprocessing_num_workers,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc=f"Grouping texts in chunks of {max_seq_length}",
+            )
 
     if training_args.do_train:
         if "train" not in tokenized_datasets:
@@ -488,6 +477,26 @@ def main():
         if data_args.max_eval_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
 
+        def preprocess_logits_for_metrics(logits, labels):
+            if isinstance(logits, tuple):
+                # Depending on the model and config, logits may contain extra tensors,
+                # like past_key_values, but logits always come first
+                logits = logits[0]
+            return logits.argmax(dim=-1)
+
+        metric = load_metric("accuracy")
+
+        def compute_metrics(eval_preds):
+            preds, labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics
+            labels = labels.reshape(-1)
+            preds = preds.reshape(-1)
+            mask = labels != -100
+            labels = labels[mask]
+            preds = preds[mask]
+            return metric.compute(predictions=preds, references=labels)
+
     # Data collator
     # This one will take care of randomly masking the tokens.
     pad_to_multiple_of_8 = data_args.line_by_line and training_args.fp16 and not data_args.pad_to_max_length
@@ -497,30 +506,19 @@ def main():
         pad_to_multiple_of=8 if pad_to_multiple_of_8 else None,
     )
 
-    # Load possible existing recipe and new one passed in through command argument
-    existing_recipe = load_recipe(model_args.model_name_or_path)
-    new_recipe = data_args.recipe
-
-    compute_metrics = None
     # Initialize our Trainer
-    trainer = SparseMLMaskedLanguageModelingTrainer(
-        model_args.model_name_or_path,
-        [existing_recipe, new_recipe],
-        teacher=teacher_model,
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
-        recipe_args=data_args.recipe_args
+        compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval and not is_torch_tpu_available()
+        else None,
     )
-
-    # Apply recipes to the model. This is necessary given that
-    # sparsification methods such as QAT modified the model graph with their own learnable
-    # parameters. They are also restored/loaded to the model.
-    trainer.apply_recipes()
 
     # Training
     if training_args.do_train:
@@ -559,23 +557,19 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "fill-mask"}
+    if data_args.dataset_name is not None:
+        kwargs["dataset_tags"] = data_args.dataset_name
+        if data_args.dataset_config_name is not None:
+            kwargs["dataset_args"] = data_args.dataset_config_name
+            kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
+        else:
+            kwargs["dataset"] = data_args.dataset_name
+
     if training_args.push_to_hub:
-        kwargs = {"finetuned_from": model_args.model_name_or_path, "tags": "fill-mask"}
-        if data_args.dataset_name is not None:
-            kwargs["dataset_tags"] = data_args.dataset_name
-            if data_args.dataset_config_name is not None:
-                kwargs["dataset_args"] = data_args.dataset_config_name
-                kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
-            else:
-                kwargs["dataset"] = data_args.dataset_name
-
         trainer.push_to_hub(**kwargs)
-
-    if data_args.onnx_export_path:
-        logger.info("*** Export to ONNX ***")
-        eval_dataloader = trainer.get_eval_dataloader(eval_dataset)
-        exporter = MaskedLanguageModelingModuleExporter(model, output_dir=data_args.onnx_export_path)
-        export_model(exporter, eval_dataloader, data_args.onnx_export_path, data_args.num_exported_samples)
+    else:
+        trainer.create_model_card(**kwargs)
 
 
 def _mp_fn(index):
