@@ -747,6 +747,14 @@ class TrainingArguments:
         default="",
         metadata={"help": "Used by the SageMaker launcher to send mp-specific args. Ignored in Trainer"},
     )
+    modifier_log_frequency: float = field(
+        default = 0.1,
+        metadata={
+            "help": (
+                "How often to log SparseML modifier data, in number of epochs or fraction of epochs"
+            )
+        }
+    )
 
     def __post_init__(self):
         # Handle --use_env option in torch.distributed.launch (local_rank not passed as an arg then).
