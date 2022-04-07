@@ -91,6 +91,22 @@ def _create_sinusoidal_embeddings(n_pos, dim, out):
     out.detach_()
 
 
+class QATMatMul(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # behaves like normal torch.matmul unless a SparseML QuantizationModifier
+        # is initialized
+        self.wrap_qat = True
+        self.qat_wrapper_kwargs = {
+            "num_inputs": 2,
+            "input_qconfigs": ["asymmetric", "symmetric"],
+        }
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor):
+        return torch.matmul(a, b)
+
+
 class Embeddings(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -153,6 +169,11 @@ class MultiHeadSelfAttention(nn.Module):
 
         self.pruned_heads = set()
 
+        # non-parameterized matmuls will behave as normal torch.matmul ops unless
+        # Quantization-Aware-Training is invoked
+        self.attention_scores_matmul = QATMatMul()
+        self.context_layer_matmul = QATMatMul()
+
     def prune_heads(self, heads):
         attention_head_size = self.dim // self.n_heads
         if len(heads) == 0:
@@ -202,7 +223,7 @@ class MultiHeadSelfAttention(nn.Module):
         v = shape(self.v_lin(value))  # (bs, n_heads, k_length, dim_per_head)
 
         q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
-        scores = torch.matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
+        scores = self.attention_scores_matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
         scores = scores.masked_fill(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
 
@@ -213,7 +234,7 @@ class MultiHeadSelfAttention(nn.Module):
         if head_mask is not None:
             weights = weights * head_mask
 
-        context = torch.matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
+        context = self.context_layer_matmul(weights, v)  # (bs, n_heads, q_length, dim_per_head)
         context = unshape(context)  # (bs, q_length, dim)
         context = self.out_lin(context)  # (bs, q_length, dim)
 
@@ -625,7 +646,6 @@ class DistilBertForMaskedLM(DistilBertPreTrainedModel):
             loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         dlbrt_output = self.distilbert(
             input_ids=input_ids,
             attention_mask=attention_mask,
