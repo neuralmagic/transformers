@@ -222,10 +222,14 @@ class MultiHeadSelfAttention(nn.Module):
         k = shape(self.k_lin(key))  # (bs, n_heads, k_length, dim_per_head)
         v = shape(self.v_lin(value))  # (bs, n_heads, k_length, dim_per_head)
 
-        q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
+        #q = q / math.sqrt(dim_per_head)  # (bs, n_heads, q_length, dim_per_head)
         scores = self.attention_scores_matmul(q, k.transpose(2, 3))  # (bs, n_heads, q_length, k_length)
+        scores = scores / math.sqrt(dim_per_head) # (bs, n_heads, q_length, k_length)
+
         mask = (mask == 0).view(mask_reshp).expand_as(scores)  # (bs, n_heads, q_length, k_length)
         scores = scores.masked_fill(mask, -float("inf"))  # (bs, n_heads, q_length, k_length)
+        #mask = (mask - 1.0) * 10000.0
+        #scores = scores + mask.view(mask_reshp).expand_as(scores)
 
         weights = nn.functional.softmax(scores, dim=-1)  # (bs, n_heads, q_length, k_length)
         weights = self.dropout(weights)  # (bs, n_heads, q_length, k_length)
