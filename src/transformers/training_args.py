@@ -640,6 +640,10 @@ class TrainingArguments:
         default=False,
         metadata={"help": "Whether or not to load the best model found during training at the end of training."},
     )
+    best_model_after_epoch: int = field(
+        default=None,
+        metadata={"help": "Epoch after which best model will be saved."},
+    )
     metric_for_best_model: Optional[str] = field(
         default=None, metadata={"help": "The metric to use to compare two different models."}
     )
@@ -748,12 +752,8 @@ class TrainingArguments:
         metadata={"help": "Used by the SageMaker launcher to send mp-specific args. Ignored in Trainer"},
     )
     modifier_log_frequency: float = field(
-        default = 0.1,
-        metadata={
-            "help": (
-                "How often to log SparseML modifier data, in number of epochs or fraction of epochs"
-            )
-        }
+        default=0.1,
+        metadata={"help": ("How often to log SparseML modifier data, in number of epochs or fraction of epochs")},
     )
 
     def __post_init__(self):
