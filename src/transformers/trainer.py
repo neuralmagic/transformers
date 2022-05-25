@@ -2436,11 +2436,18 @@ class Trainer:
         observed_num_examples = 0
         # Main evaluation loop
         for step, inputs in enumerate(dataloader):
-            inputs = {
-                k: inputs[k]
-                for k in inputs
-                if k in list(inspect.signature(model.forward).parameters.keys())
-            }
+            if isinstance(model, nn.DataParallel):
+                inputs = {
+                    k: inputs[k]
+                    for k in inputs
+                    if k in list(inspect.signature(model.module.forward).parameters.keys())
+                }
+            else:
+                inputs = {
+                    k: inputs[k]
+                    for k in inputs
+                    if k in list(inspect.signature(model.forward).parameters.keys())
+                }
 
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
