@@ -1725,7 +1725,12 @@ class Trainer:
                 torch.save(self.scaler.state_dict(), os.path.join(output_dir, SCALER_NAME))
 
         # Determine the new best metric / best model checkpoint
-        if metrics is not None and self.args.metric_for_best_model is not None:
+        if (
+            metrics is not None
+            and self.args.metric_for_best_model is not None
+            and self.args.best_model_after_epoch is not None
+            and self.state.epoch > self.args.best_model_after_epoch
+        ):
             metric_to_check = self.args.metric_for_best_model
             if not metric_to_check.startswith("eval_"):
                 metric_to_check = f"eval_{metric_to_check}"
@@ -2661,7 +2666,9 @@ class Trainer:
                     logits = smp_nested_concat(logits_mb)
             else:
                 if has_labels:
-                    with self.autocast_smart_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
+                    with self.autocast_smart_context_manager(
+                        enabled=hasattr(self, "scaler") and self.scaler.is_enabled()
+                    ):
                         loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
                     loss = loss.mean().detach()
 
@@ -2671,7 +2678,9 @@ class Trainer:
                         logits = outputs[1:]
                 else:
                     loss = None
-                    with self.autocast_smart_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
+                    with self.autocast_smart_context_manager(
+                        enabled=hasattr(self, "scaler") and self.scaler.is_enabled()
+                    ):
                         outputs = model(**inputs)
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
