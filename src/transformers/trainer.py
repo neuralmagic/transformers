@@ -2440,8 +2440,13 @@ class Trainer:
 
         observed_num_examples = 0
         # Main evaluation loop
+        module_forward_fn = model.module.forward if isinstance(model, nn.DataParallel) else model.forward
         for step, inputs in enumerate(dataloader):
-            inputs = {k: inputs[k] for k in inputs if k in list(inspect.signature(model.forward).parameters.keys())}
+            inputs = {
+                k: inputs[k]
+                for k in inputs
+                if k in list(inspect.signature(module_forward_fn).parameters.keys())
+            }
 
             # Update the observed num examples
             observed_batch_size = find_batch_size(inputs)
