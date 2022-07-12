@@ -158,13 +158,13 @@ class QATEmbeddingTransformation(nn.Module):
 
         # Behaves like normal Linear module unless a SparseML QuantizationModifier
         # is initialized.
-        # When initialized, does not quantize inputs nor outputs.
+        # When initialized, does not quantize inputs.
         # Only weights are quantized (inputs come quantized from embeddings)
         self.linear = nn.Linear(embedded_input_size, hidden_size)
         self.wrap_qat = True
         self.qat_wrapper_kwargs = {
             "num_inputs": 0,
-            "num_outputs": 0,
+            "num_outputs": 1,
         }
 
     def forward(self, x: torch.Tensor):
