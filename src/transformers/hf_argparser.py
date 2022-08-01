@@ -24,6 +24,13 @@ from typing import Any, Dict, Iterable, NewType, Optional, Tuple, Union, get_typ
 
 import yaml
 
+from sparsezoo import Model
+
+from .utils.logging import get_logger
+
+
+logger = get_logger(__name__)
+
 
 DataClass = NewType("DataClass", Any)
 DataClassType = NewType("DataClassType", Any)
@@ -286,6 +293,7 @@ class HfArgumentParser(ArgumentParser):
         outputs = self.parse_dict(data, allow_extra_keys=allow_extra_keys)
         return tuple(outputs)
 
+
     def parse_yaml_file(self, yaml_file: str, allow_extra_keys: bool = False) -> Tuple[DataClass, ...]:
         """
         Alternative helper method that does not use `argparse` at all, instead loading a json file and populating the
@@ -305,3 +313,28 @@ class HfArgumentParser(ArgumentParser):
         """
         outputs = self.parse_dict(yaml.safe_load(Path(yaml_file).read_text()), allow_extra_keys=allow_extra_keys)
         return tuple(outputs)
+
+    def _download_dataclass_zoo_stub_files(data_class: DataClass):
+        for name, val in data_class.__dict__.items():
+            if not isinstance(val, str) or "recipe" in name or not val.startswith("zoo:"):
+                continue
+
+            logger.info(f"Downloading framework files for SparseZoo stub: {val}")
+
+            zoo_model = Model(val)
+            framework_file_paths = [file.path for file in zoo_model.training.default.files]
+            assert framework_file_paths, "Unable to download any framework files for SparseZoo stub {val}"
+            framework_file_names = [os.path.basename(path) for path in framework_file_paths]
+            if "pytorch_model.bin" not in framework_file_names or ("config.json" not in framework_file_names):
+                raise RuntimeError(
+                    "Unable to find 'pytorch_model.bin' and 'config.json' in framework "
+                    f"files downloaded from {val}. Found {framework_file_names}. Check "
+                    "if the given stub is for a transformers repo model"
+                )
+            framework_dir_path = Path(framework_file_paths[0]).parent.absolute()
+
+            logger.info(f"Overwriting argument {name} to downloaded {framework_dir_path}")
+
+            data_class.__dict__[name] = str(framework_dir_path)
+
+        return data_class
