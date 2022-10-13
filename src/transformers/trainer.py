@@ -1687,7 +1687,7 @@ class Trainer:
                     _ = list(train_dataloader.sampler)
 
         for epoch in range(epochs_trained, num_train_epochs):
-            if self.use_amp and hasattr(self, "qat_active") and callable(self.qat_active) and self.qat_active(epoch):
+            if self.use_cuda_amp and hasattr(self, "qat_active") and callable(self.qat_active) and self.qat_active(epoch):
                 logger.info("entering QAT phase, disabling FP16 training")
                 self.scaler._enabled = False
 
@@ -2430,14 +2430,14 @@ class Trainer:
 
         return inputs
 
-    def compute_loss_context_manager(self):
+    def compute_loss_context_manager(self, enabled):
         """
         A helper wrapper to group together context managers.
         """
         return ContextManagers(
             [
                 self.torchdynamo_smart_context_manager(),
-                self.autocast_smart_context_manager(),
+                self.autocast_smart_context_manager(enabled=enabled),
             ]
         )
 
@@ -2447,7 +2447,7 @@ class Trainer:
         """
         return self.ctx_manager_torchdynamo
 
-    def autocast_smart_context_manager(self):
+    def autocast_smart_context_manager(self, enabled):
         """
         A helper wrapper that creates an appropriate context manager for `autocast` while feeding it the desired
         arguments, depending on the situation.
@@ -2457,10 +2457,10 @@ class Trainer:
                 ctx_manager = (
                     torch.cpu.amp.autocast(dtype=self.amp_dtype)
                     if self.use_cpu_amp
-                    else torch.cuda.amp.autocast(dtype=self.amp_dtype)
+                    else torch.cuda.amp.autocast(dtype=self.amp_dtype, enabled=enabled)
                 )
             else:
-                ctx_manager = torch.cuda.amp.autocast()
+                ctx_manager = torch.cuda.amp.autocast(enabled=enabled)
         else:
             ctx_manager = contextlib.nullcontext() if sys.version_info >= (3, 7) else contextlib.suppress()
 
@@ -2491,7 +2491,7 @@ class Trainer:
             loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
-        with self.autocast_smart_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
+        with self.compute_loss_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
             loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
@@ -3207,7 +3207,9 @@ class Trainer:
                     logits = smp_nested_concat(logits_mb)
             else:
                 if has_labels:
-                    with self.autocast_smart_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
+                    with self.compute_loss_context_manager(
+                        enabled=hasattr(self, "scaler") and self.scaler.is_enabled()
+                    ):
                         loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
                     loss = loss.mean().detach()
 
@@ -3217,7 +3219,9 @@ class Trainer:
                         logits = outputs[1:]
                 else:
                     loss = None
-                    with self.autocast_smart_context_manager(enabled=hasattr(self, "scaler") and self.scaler.is_enabled()):
+                    with self.compute_loss_context_manager(
+                        enabled=hasattr(self, "scaler") and self.scaler.is_enabled()
+                    ):
                         outputs = model(**inputs)
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
