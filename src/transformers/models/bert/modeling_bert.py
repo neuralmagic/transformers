@@ -178,6 +178,29 @@ def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
     return model
 
 
+class AdapterLinear(nn.Linear):
+    def reset_parameters(self) -> None:
+        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
+        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
+        # https://github.com/pytorch/pytorch/issues/57109
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(245))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+class Adapter(nn.Module):
+    def __init__(self, config, m=64):
+        super().__init__()
+        self.feedforward_down_project = AdapterLinear(config.hidden_size, m)
+        self.act_fn = ACT2FN[config.hidden_act]
+        self.feedforward_up_project = AdapterLinear(m, config.hidden_size)
+
+    def forward(self, hidden_states):
+        x = self.feedforward_down_project(hidden_states)
+        x = self.act_fn(x)
+        return self.feedforward_up_project(x) + hidden_states
+
 class BertEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
@@ -392,11 +415,13 @@ class BertSelfOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.adapter = Adapter(config)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
+        hidden_states = self.adapter(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
@@ -470,11 +495,13 @@ class BertOutput(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.adapter = Adapter(config)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
     def forward(self, hidden_states: torch.Tensor, input_tensor: torch.Tensor) -> torch.Tensor:
         hidden_states = self.dense(hidden_states)
+        hidden_states = self.adapter(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
