@@ -186,7 +186,7 @@ class AdapterLinear(nn.Linear):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(245))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            bound = 0.01 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
 class Adapter(nn.Module):
