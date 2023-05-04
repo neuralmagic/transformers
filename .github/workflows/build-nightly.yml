@@ -1,5 +1,5 @@
-name: build-package
-run-name: ${{ github.workflow }} is to create wheel file for pypi
+name: build-nightly
+run-name: ${{ github.workflow }} is to create nightly wheel file for pypi
 on:
   push:
     branches:

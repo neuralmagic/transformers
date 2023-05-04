@@ -1,5 +1,5 @@
-name: build-package
-run-name: ${{ github.workflow }} is to create wheel file for pypi
+name: build-release
+run-name: ${{ github.workflow }} is to create release wheel file for pypi
 on:
   push:
     branches:
