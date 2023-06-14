@@ -122,6 +122,22 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
+class QATbmm(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # behaves like normal torch.matmul unless a SparseML QuantizationModifier
+        # is initialized
+        self.wrap_qat = True
+        self.qat_wrapper_kwargs = {
+            "num_inputs": 2,
+            "num_outputs": 0,
+            "input_qconfigs": ["asymmetric", "symmetric"],
+        }
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor):
+        return torch.bmm(a, b)
+
 # Copied from transformers.models.bart.modeling_bart.BartLearnedPositionalEmbedding with Bart->MBart
 class MBartLearnedPositionalEmbedding(nn.Embedding):
     """
@@ -175,6 +191,9 @@ class MBartAttention(nn.Module):
         self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+
+        self.qk = QATbmm()
+        self.qkv = QATbmm()
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -234,7 +253,7 @@ class MBartAttention(nn.Module):
         value_states = value_states.view(*proj_shape)
 
         src_len = key_states.size(1)
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
+        attn_weights = self.qk(query_states, key_states.transpose(1, 2))
 
         if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
@@ -273,7 +292,7 @@ class MBartAttention(nn.Module):
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output = torch.bmm(attn_probs, value_states)
+        attn_output = self.qkv(attn_probs, value_states)
 
         if attn_output.size() != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
