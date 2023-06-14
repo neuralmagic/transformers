@@ -54,6 +54,22 @@ DONUT_SWIN_PRETRAINED_MODEL_ARCHIVE_LIST = [
     # See all Donut Swin models at https://huggingface.co/models?filter=donut
 ]
 
+class QATmatmul(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # behaves like normal torch.matmul unless a SparseML QuantizationModifier
+        # is initialized
+        self.wrap_qat = True
+        self.qat_wrapper_kwargs = {
+            "num_inputs": 2,
+            "num_outputs": 0,
+            "input_qconfigs": ["asymmetric", "symmetric"],
+        }
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor):
+        return torch.matmul(a, b)
+
 
 @dataclass
 # Copied from transformers.models.swin.modeling_swin.SwinEncoderOutput with Swin->DonutSwin
@@ -372,6 +388,9 @@ class DonutSwinSelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        self.qk = QATmatmul()
+        self.qkv = QATmatmul()
+
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
@@ -392,7 +411,7 @@ class DonutSwinSelfAttention(nn.Module):
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
-        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = self.qk(query_layer, key_layer.transpose(-1, -2))
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
 
@@ -424,7 +443,7 @@ class DonutSwinSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = self.qkv(attention_probs, value_layer)
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
         context_layer = context_layer.view(new_context_layer_shape)
