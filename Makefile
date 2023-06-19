@@ -1,4 +1,4 @@
-.PHONY: deps_table_update modified_only_fixup extra_style_checks quality style fixup fix-copies test test-examples
+.PHONY: deps_table_update modified_only_fixup extra_style_checks quality style fixup fix-copies test test-examples build
 
 # make sure to test the local checkout in scripts and not the pre-installed one (don't use quotes!)
 export PYTHONPATH = src
@@ -118,3 +118,7 @@ build-release:
 	python setup.py bdist_wheel
 	python setup.py sdist
 	python utils/check_build.py
+
+# neuralmagic: creates wheel file
+build:
+	python3 setup.py sdist bdist_wheel
