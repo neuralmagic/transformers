@@ -698,7 +698,7 @@ class BatchEncoding(UserDict):
             as_tensor = jnp.array
             is_tensor = _is_jax
         else:
-            as_tensor = np.asarray
+            as_tensor = _convert_to_numpy_array
             is_tensor = _is_numpy
         # (mfuntowicz: This code is unreachable)
         # else:
@@ -3728,6 +3728,21 @@ def get_fast_tokenizer_file(tokenization_files: List[str]) -> str:
             break
 
     return tokenizer_file
+
+
+def _convert_to_numpy_array(array):
+    """
+    Convert a list to a numpy array. If the list contains non-numeric values,
+    convert to an array of objects.
+
+    :param array: The list to convert
+    :return: The converted numpy array
+    """
+    try:
+        return np.array(array)
+    except ValueError:
+        # If the array contains non-numeric values, convert to an array of objects
+        return np.array(array, dtype=object)
 
 
 # To update the docstring, we need to copy the method, otherwise we change the original docstring.
