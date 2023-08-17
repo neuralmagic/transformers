@@ -6,7 +6,7 @@ from datetime import date
 
 
 nm_version_base = "1.6.0"
-transformers_version_base = "42301"  # 4.23.1
+transformers_version_base = "43100"  # 4.31.0
 is_release = False  # change to True to set the generated version as a release version
 
 
