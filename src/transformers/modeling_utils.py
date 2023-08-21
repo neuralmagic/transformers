@@ -3146,7 +3146,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                         del state_dict[checkpoint_key]
             return mismatched_keys
 
-        if resolved_archive_file is not None:
+        if resolved_archive_file:
             folder = os.path.sep.join(resolved_archive_file[0].split(os.path.sep)[:-1])
         else:
             folder = None
