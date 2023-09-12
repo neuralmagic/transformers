@@ -39,27 +39,32 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
-class MatMulLeftInput_QK(nn.Identity):
+class QuantizableIdentity(nn.Module):
+    def forward(self, x):
+        return x
+
+
+class MatMulLeftInput_QK(QuantizableIdentity):
     ...
 
 
-class MatMulRightInput_QK(nn.Identity):
+class MatMulRightInput_QK(QuantizableIdentity):
     ...
 
 
-class MatMulOutput_QK(nn.Identity):
+class MatMulOutput_QK(QuantizableIdentity):
     ...
 
 
-class MatMulLeftInput_PV(nn.Identity):
+class MatMulLeftInput_PV(QuantizableIdentity):
     ...
 
 
-class MatMulRightInput_PV(nn.Identity):
+class MatMulRightInput_PV(QuantizableIdentity):
     ...
 
 
-class MatMulOutput_PV(nn.Identity):
+class MatMulOutput_PV(QuantizableIdentity):
     ...
 
 
@@ -293,10 +298,12 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self._init_rope()
 
         self.attn_weights_matmul = QuantizableMatMul(MatMulLeftInput_QK, MatMulRightInput_QK, MatMulOutput_QK)
         self.attn_output_matmul = QuantizableMatMul(MatMulLeftInput_PV, MatMulRightInput_PV, MatMulOutput_PV)
+
+        self._init_rope()
+
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
