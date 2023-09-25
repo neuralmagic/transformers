@@ -53,6 +53,7 @@ from huggingface_hub import Repository, create_repo, upload_folder
 from packaging import version
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+from torch.utils.data.distributed import DistributedSampler
 
 from . import __version__
 from .configuration_utils import PretrainedConfig
