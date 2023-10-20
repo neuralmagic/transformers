@@ -51,6 +51,7 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
+<<<<<<< HEAD
 def _get_unpad_data(padding_mask):
     seqlens_in_batch = padding_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(padding_mask.flatten(), as_tuple=False).flatten()
@@ -61,6 +62,51 @@ def _get_unpad_data(padding_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
+=======
+class QuantizableIdentity(nn.Module):
+    def forward(self, x):
+        return x
+
+
+class MatMulLeftInput_QK(QuantizableIdentity):
+    ...
+
+
+class MatMulRightInput_QK(QuantizableIdentity):
+    ...
+
+
+class MatMulOutput_QK(QuantizableIdentity):
+    ...
+
+
+class MatMulLeftInput_PV(QuantizableIdentity):
+    ...
+
+
+class MatMulRightInput_PV(QuantizableIdentity):
+    ...
+
+
+class MatMulOutput_PV(QuantizableIdentity):
+    ...
+
+
+class QuantizableMatMul(nn.Module):
+    """
+    Wrapper around torch.matmul with distinct inputs/output class
+    instances that could be quantized through SparseML recipe
+    """
+
+    def __init__(self, left_input_cls, right_input_cls, output_cls):
+        super().__init__()
+        self.left_input = left_input_cls()
+        self.right_input = right_input_cls()
+        self.output = output_cls()
+
+    def forward(self, a: torch.Tensor, b: torch.Tensor):
+        return self.output(torch.matmul(self.left_input(a), self.right_input(b)))
+>>>>>>> 27494ce47... Research/llama/bmm quantization (#94)
 
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
@@ -284,7 +330,11 @@ class LlamaAttention(nn.Module):
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=config.attention_bias)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
+
+        self.attn_weights_matmul = QuantizableMatMul(MatMulLeftInput_QK, MatMulRightInput_QK, MatMulOutput_QK)
+        self.attn_output_matmul = QuantizableMatMul(MatMulLeftInput_PV, MatMulRightInput_PV, MatMulOutput_PV)
         self._init_rope()
+
 
     def _init_rope(self):
         if self.config.rope_scaling is None:
@@ -370,7 +420,7 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        attn_weights = self.attn_weights_matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
@@ -387,7 +437,7 @@ class LlamaAttention(nn.Module):
 
         # upcast attention to fp32
         attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = self.attn_output_matmul(attn_weights, value_states)
 
         if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
