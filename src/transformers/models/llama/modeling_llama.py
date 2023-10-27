@@ -51,7 +51,6 @@ logger = logging.get_logger(__name__)
 _CONFIG_FOR_DOC = "LlamaConfig"
 
 
-<<<<<<< HEAD
 def _get_unpad_data(padding_mask):
     seqlens_in_batch = padding_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(padding_mask.flatten(), as_tuple=False).flatten()
@@ -62,7 +61,7 @@ def _get_unpad_data(padding_mask):
         cu_seqlens,
         max_seqlen_in_batch,
     )
-=======
+
 class QuantizableIdentity(nn.Module):
     def forward(self, x):
         return x
@@ -106,7 +105,6 @@ class QuantizableMatMul(nn.Module):
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
         return self.output(torch.matmul(self.left_input(a), self.right_input(b)))
->>>>>>> 27494ce47... Research/llama/bmm quantization (#94)
 
 
 # Copied from transformers.models.bart.modeling_bart._make_causal_mask
