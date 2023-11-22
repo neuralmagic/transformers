@@ -65,19 +65,11 @@ class MatMulRightInput_QK(QuantizableIdentity):
     ...
 
 
-class MatMulOutput_QK(QuantizableIdentity):
-    ...
-
-
 class MatMulLeftInput_PV(QuantizableIdentity):
     ...
 
 
 class MatMulRightInput_PV(QuantizableIdentity):
-    ...
-
-
-class MatMulOutput_PV(QuantizableIdentity):
     ...
 
 
@@ -87,14 +79,13 @@ class QuantizableMatMul(nn.Module):
     instances that could be quantized through SparseML recipe
     """
 
-    def __init__(self, left_input_cls, right_input_cls, output_cls):
+    def __init__(self, left_input_cls, right_input_cls):
         super().__init__()
         self.left_input = left_input_cls()
         self.right_input = right_input_cls()
-        self.output = output_cls()
 
     def forward(self, a: torch.Tensor, b: torch.Tensor):
-        return self.output(torch.matmul(self.left_input(a), self.right_input(b)))
+        return torch.matmul(self.left_input(a), self.right_input(b))
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
@@ -281,8 +272,8 @@ class MistralAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.attn_weights_matmul = QuantizableMatMul(MatMulLeftInput_QK, MatMulRightInput_QK, MatMulOutput_QK)
-        self.attn_output_matmul = QuantizableMatMul(MatMulLeftInput_PV, MatMulRightInput_PV, MatMulOutput_PV)
+        self.attn_weights_matmul = QuantizableMatMul(MatMulLeftInput_QK, MatMulRightInput_QK)
+        self.attn_output_matmul = QuantizableMatMul(MatMulLeftInput_PV, MatMulRightInput_PV)
 
         self.rotary_emb = MistralRotaryEmbedding(
             self.head_dim,
