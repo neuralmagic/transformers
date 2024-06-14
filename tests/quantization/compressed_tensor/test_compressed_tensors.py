@@ -52,6 +52,13 @@ class CompressedTensorsTest(unittest.TestCase):
         self.assertIsNotNone(outputs)
         self.tear_down()
 
+    def test_quantized_model_initialized_scale_zero_point(self):
+        for _, module in self.quantized_model.named_modules():
+            scheme = getattr(module, "quantization_scheme", None)
+            if scheme is not None:
+                self.assertIsNotNone(module.weight_scale)
+                self.assertIsNotNone(module.weight_zero_point)
+
     @slow
     def test_forward(self):
         batch_size = context_size = 1024
