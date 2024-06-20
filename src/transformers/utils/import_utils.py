@@ -174,6 +174,7 @@ _torchdistx_available = _is_package_available("torchdistx")
 _torchvision_available = _is_package_available("torchvision")
 _mlx_available = _is_package_available("mlx")
 _hqq_available = _is_package_available("hqq")
+_is_compressed_tensors_available = _is_package_available("compressed_tensors")
 
 
 _torch_version = "N/A"
@@ -880,6 +881,10 @@ def is_safetensors_available():
 
 def is_tokenizers_available():
     return _tokenizers_available
+
+
+def is_compressed_tensors_available():
+    return _is_compressed_tensors_available
 
 
 @lru_cache

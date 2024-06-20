@@ -1,13 +1,16 @@
 import copy
 import json
 import os
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+from safetensors import safe_open
 
 from .configuration_utils import PretrainedConfig
-from .utils import is_hqq_available, is_quanto_available, logging
+from .utils import is_compressed_tensors_available, is_hqq_available, is_quanto_available, logging
 
 
 if is_quanto_available():
@@ -15,6 +18,13 @@ if is_quanto_available():
 
 if is_hqq_available():
     from hqq.core.quantize import Quantizer as HQQQuantizer
+
+if is_compressed_tensors_available() or True:  # hack for now
+    from compressed_tensors import COMPRESSION_CONFIG_NAME, KV_CACHE_SCHEME_NAME
+    from compressed_tensors.quantization.lifecycle.forward import dequantize as compressed_tensors_dequantize
+    from compressed_tensors.quantization.lifecycle.forward import quantize as compressed_tensors_quantize
+    from compressed_tensors.quantization.quant_args import QuantizationArgs
+    from compressed_tensors.quantization.utils import KV_CACHE_TARGETS
 
 logger = logging.get_logger(__name__)
 
@@ -286,6 +296,124 @@ class QuantizedCacheConfig(CacheConfig):
             )
 
 
+class CompressedTensorsQuantizedCacheConfig(QuantizedCacheConfig):
+    """
+    Wrapper around QuantizedCacheConfig, that supports compressed-tensors
+    specific kv cache static quantization.
+
+    Attributes:
+        kv_cache_scheme (`Union[QuantizationArgs, dict]`):
+            The configuration that specifies the quantization of the kv cache
+        model_path (`Union[str, os.PathLike]`):
+            Path to the model (needed to fetch the static qparams from model's state_dict)
+    """
+
+    def __init__(
+        self,
+        kv_cache_scheme: Union[dict, QuantizationArgs],
+        model_path: Union[str, os.PathLike],
+        **kwargs,
+    ):
+        super().__init__(backend="compressed-tensors", **kwargs)
+
+        # store the compressed-tensors-specific kv cache
+        # quantization scheme as an attribute
+        if not isinstance(kv_cache_scheme, QuantizationArgs):
+            kv_cache_scheme = QuantizationArgs(**kv_cache_scheme)
+        self.kv_cache_scheme = kv_cache_scheme
+
+        # fetch the qparams from the model's state dict, so that they can be
+        # used during inference for static quantization/dequantization
+        scales_per_layer, zero_points_per_layer = self.get_qparams(model_path=model_path)
+
+        self.scales_per_layer = scales_per_layer
+        self.zero_points_per_layer = zero_points_per_layer
+
+    @staticmethod
+    def get_qparams(model_path: Union[str, os.PathLike]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+        """
+        Parse out the qparams from the model's state dict. It is
+        assumed that state dict as saved as one or more .safetensors files
+        Args:
+            model_path (`Union[str, os.PathLike]`):
+            The path to the model in question
+        Returns:
+            A tuple of dictionaries that contain the information about
+            - the quantization scales of keys and values...
+            - the quantization zero points of keys and values...
+            ...for every layer (attention block)
+        """
+        cache_names = ["key", "value"]
+
+        scales_per_layer = defaultdict(list)
+        zero_points_per_layer = defaultdict(list)
+
+        safetensors_files = [
+            os.path.join(model_path, file_) for file_ in os.listdir(model_path) if file_.endswith(".safetensors")
+        ]
+
+        for safetensors_file in safetensors_files:
+            with safe_open(safetensors_file, framework="pt") as f:
+                for tensor_name in f.keys():
+                    is_kv_cache_param = False
+                    if re.match(KV_CACHE_TARGETS[0][3:], tensor_name):
+                        # match on keys
+                        cache_name = cache_names[0]
+                        is_kv_cache_param = True
+                    elif re.match(KV_CACHE_TARGETS[1][3:], tensor_name):
+                        # match on values
+                        cache_name = cache_names[1]
+                        is_kv_cache_param = True
+
+                    if is_kv_cache_param:
+                        # qparams are being stored as
+                        # output activations
+                        param = f.get_tensor(tensor_name)
+                        if tensor_name.endswith("output_scale"):
+                            scales_per_layer[cache_name].append(param)
+                        if tensor_name.endswith("output_zero_point"):
+                            zero_points_per_layer[cache_name].append(param)
+
+        # validation and postprocessing
+        num_hidden_layers = PretrainedConfig.from_pretrained(model_path).num_hidden_layers
+        for key in cache_names:
+            for qparam_dict in [scales_per_layer, zero_points_per_layer]:
+                assert key in qparam_dict
+                if len(qparam_dict[key]) != num_hidden_layers:
+                    raise ValueError(
+                        f"Since the model has {num_hidden_layers} "
+                        "attention blocks, the number of qparams "
+                        f"for cache: {key} should also be "
+                        f"{num_hidden_layers}. "
+                        f"However, found {len(qparam_dict[key])}"
+                    )
+                # stack tensor list for elegance
+                qparam_dict[key] = torch.stack(qparam_dict[key])
+        return scales_per_layer, zero_points_per_layer
+
+    @classmethod
+    def from_pretrained(cls, model_path: Union[str, os.PathLike], **kwargs) -> QuantizedCacheConfig:
+        config = PretrainedConfig.from_pretrained(model_path)
+
+        compression_config = (
+            getattr(config, COMPRESSION_CONFIG_NAME) if hasattr(config, COMPRESSION_CONFIG_NAME) else None
+        )
+
+        if compression_config is None:
+            raise ValueError(
+                f"Attempting to fetch `{COMPRESSION_CONFIG_NAME}` "
+                f"but the entry is missing in the config for {model_path}"
+            )
+        kv_cache_config = compression_config.get(KV_CACHE_SCHEME_NAME)
+
+        if kv_cache_config is None:
+            raise ValueError(
+                f"Attempting to fetch quantized `{KV_CACHE_SCHEME_NAME}` from config "
+                f"but the entry is missing in the `{COMPRESSION_CONFIG_NAME}` for {model_path}"
+            )
+        return CompressedTensorsQuantizedCacheConfig(kv_cache_config, model_path, **kwargs)
+
+
 class DynamicCache(Cache):
     """
     A cache that grows dynamically as more tokens are generated. This is the default for generative models.
@@ -430,14 +558,18 @@ class QuantizedCache(DynamicCache):
             self._seen_tokens += key_states.shape[-2]
 
         if len(self.key_cache) <= layer_idx:
-            self._quantized_key_cache.append(self._quantize(key_states.contiguous(), axis=self.axis_key))
-            self._quantized_value_cache.append(self._quantize(value_states.contiguous(), axis=self.axis_value))
+            self._quantized_key_cache.append(
+                self._quantize(key_states.contiguous(), axis=self.axis_key, cache_type="key")
+            )
+            self._quantized_value_cache.append(
+                self._quantize(value_states.contiguous(), axis=self.axis_value, cache_type="value")
+            )
             self.key_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
             self.value_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
             keys_to_return, values_to_return = key_states, value_states
         else:
-            dequant_key = self._dequantize(self._quantized_key_cache[layer_idx])
-            dequant_value = self._dequantize(self._quantized_value_cache[layer_idx])
+            dequant_key = self._dequantize(self._quantized_key_cache[layer_idx], cache_type="key")
+            dequant_value = self._dequantize(self._quantized_value_cache[layer_idx], cache_type="value")
             keys_to_return = [dequant_key, self.key_cache[layer_idx], key_states]
             values_to_return = [dequant_value, self.value_cache[layer_idx], value_states]
 
@@ -447,9 +579,11 @@ class QuantizedCache(DynamicCache):
                 self.key_cache[layer_idx].dim() == 4
                 and self.key_cache[layer_idx].shape[-2] + 1 >= self.residual_length
             ):
-                self._quantized_key_cache[layer_idx] = self._quantize(keys_to_return.contiguous(), axis=self.axis_key)
+                self._quantized_key_cache[layer_idx] = self._quantize(
+                    keys_to_return.contiguous(), axis=self.axis_key, cache_type="key"
+                )
                 self._quantized_value_cache[layer_idx] = self._quantize(
-                    values_to_return.contiguous(), axis=self.axis_value
+                    values_to_return.contiguous(), axis=self.axis_value, cache_type="value"
                 )
                 self.key_cache[layer_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
                 self.value_cache[layer_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
@@ -468,13 +602,60 @@ class QuantizedCache(DynamicCache):
         # this part of code otherwise fails when used to verify attn_weight shape in some models
         return self._seen_tokens if layer_idx == 0 else self._seen_tokens - 1
 
-    def _quantize(self, tensor, axis):
+    def _quantize(self, tensor, axis, cache_type):
         """Quantizes a key/value using a defined quantization method."""
         raise NotImplementedError("Make sure to implement `_quantize` in a subclass.")
 
-    def _dequantize(self, q_tensor):
+    def _dequantize(self, q_tensor, cache_type):
         """Dequantizes back the tensor that was quantized by `self._quantize()`"""
         raise NotImplementedError("Make sure to implement `_dequantize` in a subclass.")
+
+
+class CompressedTensorsCache(QuantizedCache):
+    def __init__(self, cache_config: CacheConfig) -> None:
+        super().__init__(cache_config)
+
+        self.kv_cache_scheme = cache_config.kv_cache_scheme
+        self.scales_per_layer = cache_config.scales_per_layer
+        self.zero_points_per_layer = cache_config.zero_points_per_layer
+        self.quant_dtype = self._establish_quant_dtype(
+            num_bits=self.kv_cache_scheme.num_bits, type_=self.kv_cache_scheme.type
+        )
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # temporarily save the current layer_idx as a class attribute,
+        # so it can be reused in _quantize/_dequantize methods
+        self._layer_idx = layer_idx
+        return super().update(key_states, value_states, layer_idx, cache_kwargs)
+
+    @staticmethod
+    def _establish_quant_dtype(num_bits: int, type_: str) -> torch.dtype:
+        if num_bits == 8 and type_ == "int":
+            return torch.int8
+        raise NotImplementedError(
+            f"Static kv cache quantization is not supported for num_bits: {num_bits}, type: {type_}"
+        )
+
+    def _quantize(self, tensor, axis, cache_type):
+        scale = self.scales_per_layer[cache_type][self._layer_idx]
+        zero_point = self.zero_points_per_layer[cache_type][self._layer_idx]
+
+        return compressed_tensors_quantize(
+            x=tensor, scale=scale, zero_point=zero_point, args=self.kv_cache_scheme, dtype=self.quant_dtype
+        )
+
+    def _dequantize(self, qtensor, cache_type):
+        scale = self.scales_per_layer[cache_type][self._layer_idx]
+        zero_point = self.zero_points_per_layer[cache_type][self._layer_idx]
+        return compressed_tensors_dequantize(
+            x_q=qtensor, scale=scale, zero_point=zero_point, args=self.kv_cache_scheme
+        )
 
 
 class QuantoQuantizedCache(QuantizedCache):
@@ -501,11 +682,11 @@ class QuantoQuantizedCache(QuantizedCache):
 
         self.qtype = qint4 if self.nbits == 4 else qint2
 
-    def _quantize(self, tensor, axis):
+    def _quantize(self, tensor, axis, cache_type):
         qtensor = QBitsTensor.quantize(tensor, axis=axis, qtype=self.qtype, group_size=self.q_group_size)
         return qtensor
 
-    def _dequantize(self, qtensor):
+    def _dequantize(self, qtensor, cache_type):
         return qtensor.dequantize()
 
 
@@ -533,7 +714,7 @@ class HQQQuantizedCache(QuantizedCache):
 
         self.quantizer = HQQQuantizer
 
-    def _quantize(self, tensor, axis):
+    def _quantize(self, tensor, axis, cache_type):
         qtensor, meta = self.quantizer.quantize(
             tensor,
             axis=axis,
@@ -546,7 +727,7 @@ class HQQQuantizedCache(QuantizedCache):
         self.quantizer.cuda(qtensor, meta=meta, device=self.device)  # Move to device and cast to dtype
         return qtensor, meta
 
-    def _dequantize(self, qtensor):
+    def _dequantize(self, qtensor, cache_type):
         quant_tensor, meta = qtensor
         tensor = self.quantizer.dequantize(quant_tensor, meta)
         return tensor
