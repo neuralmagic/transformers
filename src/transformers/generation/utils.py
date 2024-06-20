@@ -26,6 +26,7 @@ from torch import nn
 
 from ..cache_utils import (
     Cache,
+    CompressedTensorsCache,
     DynamicCache,
     HQQQuantizedCache,
     QuantizedCacheConfig,
@@ -112,7 +113,11 @@ if is_accelerate_available():
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
 NEED_SETUP_CACHE_CLASSES_MAPPING = {"static": StaticCache, "sliding_window": SlidingWindowCache}
-QUANT_BACKEND_CLASSES_MAPPING = {"quanto": QuantoQuantizedCache, "HQQ": HQQQuantizedCache}
+QUANT_BACKEND_CLASSES_MAPPING = {
+    "quanto": QuantoQuantizedCache,
+    "HQQ": HQQQuantizedCache,
+    "compressed-tensors": CompressedTensorsCache,
+}
 
 
 @dataclass
