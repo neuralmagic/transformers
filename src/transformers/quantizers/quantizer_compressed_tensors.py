@@ -37,7 +37,7 @@ class CompressedTensorsHfQuantizer(HfQuantizer):
 
         from compressed_tensors.compressors import ModelCompressor
 
-        self.run_compressed = True
+        self.run_compressed = False
         self.compressor = ModelCompressor.from_compression_config(quantization_config)
 
     def validate_environment(self, *args, **kwargs):
@@ -62,6 +62,9 @@ class CompressedTensorsHfQuantizer(HfQuantizer):
 
     def _process_model_after_weight_loading(self, model, resolved_archive_file, **kwargs):
         if not self.run_compressed:
+            from compressed_tensors.quantization import QuantizationStatus
+            
+            self.quantization_config.quantization_status = QuantizationStatus.FROZEN
             self.compressor.decompress(model_path=resolved_archive_file, model=model)
 
     @property
