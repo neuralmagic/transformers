@@ -66,16 +66,14 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         + (MODEL_FOR_CTC_MAPPING.items() if MODEL_FOR_CTC_MAPPING else [])
     )
 
-    def get_test_pipeline(self, model, tokenizer, processor):
+    def get_test_pipeline(self, model, tokenizer, processor, torch_dtype="float32"):
         if tokenizer is None:
             # Side effect of no Fast Tokenizer class for these model, so skipping
             # But the slow tokenizer test should still run as they're quite small
-            self.skipTest("No tokenizer available")
-            return
-            # return None, None
+            self.skipTest(reason="No tokenizer available")
 
         speech_recognizer = AutomaticSpeechRecognitionPipeline(
-            model=model, tokenizer=tokenizer, feature_extractor=processor
+            model=model, tokenizer=tokenizer, feature_extractor=processor, torch_dtype=torch_dtype
         )
 
         # test with a raw waveform
@@ -169,6 +167,48 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         ):
             _ = speech_recognizer(waveform, return_timestamps="char")
 
+    @require_torch
+    def test_small_model_pt_fp16(self):
+        speech_recognizer = pipeline(
+            task="automatic-speech-recognition",
+            model="facebook/s2t-small-mustc-en-fr-st",
+            tokenizer="facebook/s2t-small-mustc-en-fr-st",
+            framework="pt",
+            torch_dtype=torch.float16,
+        )
+        waveform = np.tile(np.arange(1000, dtype=np.float32), 34)
+        output = speech_recognizer(waveform)
+        self.assertEqual(output, {"text": "(Applaudissements)"})
+        output = speech_recognizer(waveform, chunk_length_s=10)
+        self.assertEqual(output, {"text": "(Applaudissements)"})
+
+        # Non CTC models cannot use return_timestamps
+        with self.assertRaisesRegex(
+            ValueError, "^We cannot return_timestamps yet on non-CTC models apart from Whisper!$"
+        ):
+            _ = speech_recognizer(waveform, return_timestamps="char")
+
+    @require_torch
+    def test_small_model_pt_bf16(self):
+        speech_recognizer = pipeline(
+            task="automatic-speech-recognition",
+            model="facebook/s2t-small-mustc-en-fr-st",
+            tokenizer="facebook/s2t-small-mustc-en-fr-st",
+            framework="pt",
+            torch_dtype=torch.bfloat16,
+        )
+        waveform = np.tile(np.arange(1000, dtype=np.float32), 34)
+        output = speech_recognizer(waveform)
+        self.assertEqual(output, {"text": "(Applaudissements)"})
+        output = speech_recognizer(waveform, chunk_length_s=10)
+        self.assertEqual(output, {"text": "(Applaudissements)"})
+
+        # Non CTC models cannot use return_timestamps
+        with self.assertRaisesRegex(
+            ValueError, "^We cannot return_timestamps yet on non-CTC models apart from Whisper!$"
+        ):
+            _ = speech_recognizer(waveform, return_timestamps="char")
+
     @slow
     @require_torch_accelerator
     def test_whisper_fp16(self):
@@ -206,7 +246,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
     @require_torch
     @require_pyctcdecode
     def test_large_model_pt_with_lm(self):
-        dataset = load_dataset("Narsil/asr_dummy", streaming=True)
+        dataset = load_dataset("Narsil/asr_dummy", streaming=True, trust_remote_code=True)
         third_item = next(iter(dataset["test"].skip(3)))
         filename = third_item["file"]
 
@@ -271,7 +311,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
 
     @require_tf
     def test_small_model_tf(self):
-        self.skipTest("Tensorflow not supported yet.")
+        self.skipTest(reason="Tensorflow not supported yet.")
 
     @require_torch
     def test_torch_small_no_tokenizer_files(self):
@@ -297,8 +337,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         self.assertEqual(output, {"text": ""})
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": "A MAN SAID TO THE UNIVERSE SIR I EXIST"})
 
     @require_torch
@@ -314,13 +354,12 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         self.assertEqual(output, {"text": ""})
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": "a man said to the universe sir i exist"})
 
     @slow
     @require_torch
-    @slow
     def test_return_timestamps_in_preprocess(self):
         pipe = pipeline(
             task="automatic-speech-recognition",
@@ -328,12 +367,12 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             chunk_length_s=8,
             stride_length_s=1,
         )
-        data = load_dataset("librispeech_asr", "clean", split="test", streaming=True)
+        data = load_dataset("openslr/librispeech_asr", "clean", split="test", streaming=True, trust_remote_code=True)
         sample = next(iter(data))
-        pipe.model.config.forced_decoder_ids = pipe.tokenizer.get_decoder_prompt_ids(language="en", task="transcribe")
 
         res = pipe(sample["audio"]["array"])
         self.assertEqual(res, {"text": " Conquered returned to its place amidst the tents."})
+
         res = pipe(sample["audio"]["array"], return_timestamps=True)
         self.assertEqual(
             res,
@@ -342,9 +381,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
                 "chunks": [{"timestamp": (0.0, 3.36), "text": " Conquered returned to its place amidst the tents."}],
             },
         )
-        pipe.model.generation_config.alignment_heads = [[2, 2], [3, 0], [3, 2], [3, 3], [3, 4], [3, 5]]
-        res = pipe(sample["audio"]["array"], return_timestamps="word")
 
+        res = pipe(sample["audio"]["array"], return_timestamps="word")
         # fmt: off
         self.assertEqual(
             res,
@@ -366,12 +404,69 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
 
     @slow
     @require_torch
+    def test_return_timestamps_and_language_in_preprocess(self):
+        pipe = pipeline(
+            task="automatic-speech-recognition",
+            model="openai/whisper-tiny",
+            chunk_length_s=8,
+            stride_length_s=1,
+            return_language=True,
+        )
+        data = load_dataset("openslr/librispeech_asr", "clean", split="test", streaming=True, trust_remote_code=True)
+        sample = next(iter(data))
+
+        res = pipe(sample["audio"]["array"])
+        self.assertEqual(
+            res,
+            {
+                "text": " Conquered returned to its place amidst the tents.",
+                "chunks": [{"language": "english", "text": " Conquered returned to its place amidst the tents."}],
+            },
+        )
+
+        res = pipe(sample["audio"]["array"], return_timestamps=True)
+        self.assertEqual(
+            res,
+            {
+                "text": " Conquered returned to its place amidst the tents.",
+                "chunks": [
+                    {
+                        "timestamp": (0.0, 3.36),
+                        "language": "english",
+                        "text": " Conquered returned to its place amidst the tents.",
+                    }
+                ],
+            },
+        )
+
+        res = pipe(sample["audio"]["array"], return_timestamps="word")
+        # fmt: off
+        self.assertEqual(
+            res,
+            {
+                'text': ' Conquered returned to its place amidst the tents.',
+                'chunks': [
+                    {"language": "english",'text': ' Conquered', 'timestamp': (0.5, 1.2)},
+                    {"language": "english", 'text': ' returned', 'timestamp': (1.2, 1.64)},
+                    {"language": "english",'text': ' to', 'timestamp': (1.64, 1.84)},
+                    {"language": "english",'text': ' its', 'timestamp': (1.84, 2.02)},
+                    {"language": "english",'text': ' place', 'timestamp': (2.02, 2.28)},
+                    {"language": "english",'text': ' amidst', 'timestamp': (2.28, 2.8)},
+                    {"language": "english",'text': ' the', 'timestamp': (2.8, 2.98)},
+                    {"language": "english",'text': ' tents.', 'timestamp': (2.98, 3.48)},
+                ],
+            },
+        )
+        # fmt: on
+
+    @slow
+    @require_torch
     def test_return_timestamps_in_preprocess_longform(self):
         pipe = pipeline(
             task="automatic-speech-recognition",
             model="openai/whisper-tiny.en",
         )
-        data = load_dataset("librispeech_asr", "clean", split="test", streaming=True)
+        data = load_dataset("openslr/librispeech_asr", "clean", split="test", streaming=True, trust_remote_code=True)
         samples = [next(iter(data)) for _ in range(8)]
         audio = np.concatenate([sample["audio"]["array"] for sample in samples])
 
@@ -489,12 +584,29 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             framework="pt",
         )
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": " A man said to the universe, Sir, I exist."})
 
-        output = speech_recognizer([filename], chunk_length_s=5, batch_size=4)
+        output = speech_recognizer([ds[40]["audio"]], chunk_length_s=5, batch_size=4)
         self.assertEqual(output, [{"text": " A man said to the universe, Sir, I exist."}])
+
+    @require_torch
+    @slow
+    def test_torch_whisper_batched(self):
+        speech_recognizer = pipeline(
+            task="automatic-speech-recognition",
+            model="openai/whisper-tiny",
+            framework="pt",
+        )
+        ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:2]")
+        EXPECTED_OUTPUT = [
+            {"text": " Mr. Quilter is the apostle of the middle classes and we are glad to welcome his gospel."},
+            {"text": " Nor is Mr. Quilters' manner less interesting than his matter."},
+        ]
+
+        output = speech_recognizer(ds["audio"], batch_size=2)
+        self.assertEqual(output, EXPECTED_OUTPUT)
 
     @slow
     def test_find_longest_common_subsequence(self):
@@ -944,8 +1056,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         )
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": 'Ein Mann sagte zum Universum : " Sir, ich existiert! "'})
 
     @slow
@@ -962,13 +1074,11 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         self.assertEqual(output, {"text": ""})
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = asr(filename)
+        audio = ds[40]["audio"]
+        output = asr(audio)
         self.assertEqual(output, {"text": "A MAN SAID TO THE UNIVERSE SIR I EXIST"})
 
-        filename = ds[40]["file"]
-        with open(filename, "rb") as f:
-            data = f.read()
+        data = Audio().encode_example(ds[40]["audio"])["bytes"]
         output = asr(data)
         self.assertEqual(output, {"text": "A MAN SAID TO THE UNIVERSE SIR I EXIST"})
 
@@ -988,13 +1098,11 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         self.assertEqual(output, {"text": "(Applausi)"})
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = asr(filename)
+        audio = ds[40]["audio"]
+        output = asr(audio)
         self.assertEqual(output, {"text": "Un uomo disse all'universo: \"Signore, io esisto."})
 
-        filename = ds[40]["file"]
-        with open(filename, "rb") as f:
-            data = f.read()
+        data = Audio().encode_example(ds[40]["audio"])["bytes"]
         output = asr(data)
         self.assertEqual(output, {"text": "Un uomo disse all'universo: \"Signore, io esisto."})
 
@@ -1008,13 +1116,13 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             framework="pt",
         )
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-        filename = ds[0]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[0]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(
             output,
             {"text": " Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."},
         )
-        output = speech_recognizer(filename, return_timestamps=True)
+        output = speech_recognizer(ds[0]["audio"], return_timestamps=True)
         self.assertEqual(
             output,
             {
@@ -1030,7 +1138,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             },
         )
         speech_recognizer.model.generation_config.alignment_heads = [[2, 2], [3, 0], [3, 2], [3, 3], [3, 4], [3, 5]]
-        output = speech_recognizer(filename, return_timestamps="word")
+        output = speech_recognizer(ds[0]["audio"], return_timestamps="word")
         # fmt: off
         self.assertEqual(
             output,
@@ -1065,7 +1173,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             "^Whisper cannot return `char` timestamps, only word level or segment level timestamps. "
             "Use `return_timestamps='word'` or `return_timestamps=True` respectively.$",
         ):
-            _ = speech_recognizer(filename, return_timestamps="char")
+            _ = speech_recognizer(audio, return_timestamps="char")
 
     @slow
     @require_torch
@@ -1077,8 +1185,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             framework="pt",
         )
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": " A man said to the universe, Sir, I exist."})
 
         model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large")
@@ -1088,7 +1196,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         speech_recognizer_2 = AutomaticSpeechRecognitionPipeline(
             model=model, tokenizer=tokenizer, feature_extractor=feature_extractor
         )
-        output_2 = speech_recognizer_2(filename)
+        output_2 = speech_recognizer_2(ds[0]["audio"])
         self.assertEqual(output, output_2)
 
         # either use generate_kwargs or set the model's generation_config
@@ -1100,7 +1208,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             feature_extractor=feature_extractor,
             generate_kwargs={"task": "transcribe", "language": "<|it|>"},
         )
-        output_3 = speech_translator(filename)
+        output_3 = speech_translator(ds[0]["audio"])
         self.assertEqual(output_3, {"text": " Un uomo ha detto all'universo, Sir, esiste."})
 
     @slow
@@ -1112,10 +1220,10 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             framework="pt",
         )
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
-        filename = ds[0]["file"]
+        audio = ds[0]["audio"]
 
         # 1. English-only model compatible with no language argument
-        output = speech_recognizer(filename)
+        output = speech_recognizer(audio)
         self.assertEqual(
             output,
             {"text": " Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel."},
@@ -1127,7 +1235,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             "Cannot specify `task` or `language` for an English-only model. If the model is intended to be multilingual, "
             "pass `is_multilingual=True` to generate, or update the generation config.",
         ):
-            _ = speech_recognizer(filename, generate_kwargs={"language": "en"})
+            _ = speech_recognizer(ds[0]["audio"], generate_kwargs={"language": "en"})
 
         # 3. Multilingual model accepts language argument
         speech_recognizer = pipeline(
@@ -1135,7 +1243,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             model="openai/whisper-tiny",
             framework="pt",
         )
-        output = speech_recognizer(filename, generate_kwargs={"language": "en"})
+        output = speech_recognizer(ds[0]["audio"], generate_kwargs={"language": "en"})
         self.assertEqual(
             output,
             {"text": " Mr. Quilter is the apostle of the middle classes and we are glad to welcome his gospel."},
@@ -1144,7 +1252,9 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
     @slow
     def test_speculative_decoding_whisper_non_distil(self):
         # Load data:
-        dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]")
+        dataset = load_dataset(
+            "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]", trust_remote_code=True
+        )
         sample = dataset[0]["audio"]
 
         # Load model:
@@ -1188,7 +1298,9 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
     @slow
     def test_speculative_decoding_whisper_distil(self):
         # Load data:
-        dataset = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]")
+        dataset = load_dataset(
+            "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation[:1]", trust_remote_code=True
+        )
         sample = dataset[0]["audio"]
 
         # Load model:
@@ -1241,8 +1353,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         )
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": "A man said to the universe: “Sir, I exist."})
 
     @slow
@@ -1257,8 +1369,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         )
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": "Ein Mann sagte zu dem Universum, Sir, ich bin da."})
 
     @slow
@@ -1274,9 +1386,8 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
         )
 
         ds = load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation").sort("id")
-        filename = ds[40]["file"]
-
-        output = speech_recognizer(filename)
+        audio = ds[40]["audio"]
+        output = speech_recognizer(audio)
         self.assertEqual(output, {"text": "a man said to the universe sir i exist"})
 
     @slow
@@ -1439,7 +1550,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
     def test_whisper_prompted(self):
         processor = AutoProcessor.from_pretrained("openai/whisper-tiny")
         model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-tiny")
-        model = model.to("cuda")
+        model = model.to(torch_device)
 
         pipe = pipeline(
             "automatic-speech-recognition",
@@ -1449,7 +1560,6 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             max_new_tokens=128,
             chunk_length_s=30,
             batch_size=16,
-            device="cuda:0",
         )
 
         dataset = load_dataset("distil-whisper/librispeech_long", "clean", split="validation")
@@ -1457,7 +1567,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
 
         # prompt the model to misspell "Mr Quilter" as "Mr Quillter"
         whisper_prompt = "Mr. Quillter."
-        prompt_ids = pipe.tokenizer.get_prompt_ids(whisper_prompt, return_tensors="pt")
+        prompt_ids = pipe.tokenizer.get_prompt_ids(whisper_prompt, return_tensors="pt").to(torch_device)
 
         unprompted_result = pipe(sample.copy())["text"]
         prompted_result = pipe(sample, generate_kwargs={"prompt_ids": prompt_ids})["text"]
@@ -1488,6 +1598,7 @@ class AutomaticSpeechRecognitionPipelineTests(unittest.TestCase):
             feature_extractor=processor.feature_extractor,
             max_new_tokens=128,
             device=torch_device,
+            return_timestamps=True,  # to allow longform generation
         )
 
         ds = load_dataset("distil-whisper/meanwhile", "default")["test"]
@@ -1801,7 +1912,7 @@ def require_ffmpeg(test_case):
         subprocess.check_output(["ffmpeg", "-h"], stderr=subprocess.DEVNULL)
         return test_case
     except Exception:
-        return unittest.skip("test requires ffmpeg")(test_case)
+        return unittest.skip(reason="test requires ffmpeg")(test_case)
 
 
 def bytes_iter(chunk_size, chunks):

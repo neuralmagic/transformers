@@ -16,7 +16,14 @@
 
 import unittest
 
-from transformers.testing_utils import require_detectron2, require_torch, require_torch_multi_gpu, slow, torch_device
+from transformers.testing_utils import (
+    require_detectron2,
+    require_non_xpu,
+    require_torch,
+    require_torch_multi_gpu,
+    slow,
+    torch_device,
+)
 from transformers.utils import is_detectron2_available, is_torch_available
 
 from ...test_configuration_common import ConfigTester
@@ -251,6 +258,7 @@ class LayoutLMv2ModelTester:
         return config, inputs_dict
 
 
+@require_non_xpu
 @require_torch
 @require_detectron2
 class LayoutLMv2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
@@ -414,7 +422,7 @@ class LayoutLMv2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCa
 
             check_hidden_states_output(inputs_dict, config, model_class)
 
-    @unittest.skip("We cannot configure detectron2 to output a smaller backbone")
+    @unittest.skip(reason="We cannot configure detectron2 to output a smaller backbone")
     def test_model_is_small(self):
         pass
 

@@ -36,7 +36,7 @@ class TextToSpeechTool(PipelineTool):
     model_class = SpeechT5ForTextToSpeech
     post_processor_class = SpeechT5HifiGan
 
-    inputs = {"text": {"type": "text", "description": "The text to read out loud (in English)"}}
+    inputs = {"text": {"type": "string", "description": "The text to read out loud (in English)"}}
     output_type = "audio"
 
     def setup(self):
@@ -51,7 +51,9 @@ class TextToSpeechTool(PipelineTool):
             if not is_datasets_available():
                 raise ImportError("Datasets needs to be installed if not passing speaker embeddings.")
 
-            embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
+            embeddings_dataset = load_dataset(
+                "Matthijs/cmu-arctic-xvectors", split="validation", trust_remote_code=True
+            )
             speaker_embeddings = torch.tensor(embeddings_dataset[7305]["xvector"]).unsqueeze(0)
 
         return {"input_ids": inputs["input_ids"], "speaker_embeddings": speaker_embeddings}

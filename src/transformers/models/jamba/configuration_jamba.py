@@ -53,7 +53,7 @@ class JambaConfig(PretrainedConfig):
         num_key_value_heads (`int`, *optional*, defaults to 8):
             This is the number of key_value heads that should be used to implement Grouped Query Attention. If
             `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1 the model will use Multi Query Attention (MQA) otherwise GQA is used. When
+            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used. When
             converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
             by meanpooling all the original heads within that group. For more details checkout [this
             paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to `8`.
@@ -193,6 +193,9 @@ class JambaConfig(PretrainedConfig):
         self.attn_layer_period = attn_layer_period
         self.attn_layer_offset = attn_layer_offset
 
+        self._check_supported_offset("attention", self.attn_layer_period, self.attn_layer_offset)
+        self._check_supported_offset("expert", self.expert_layer_period, self.expert_layer_offset)
+
         self.use_mamba_kernels = use_mamba_kernels
         self.mamba_d_state = mamba_d_state
         self.mamba_d_conv = mamba_d_conv
@@ -222,3 +225,9 @@ class JambaConfig(PretrainedConfig):
             self.num_experts if i % self.expert_layer_period == self.expert_layer_offset else 1
             for i in range(self.num_hidden_layers)
         ]
+
+    def _check_supported_offset(self, property_: str, period: int, offset: int):
+        if offset >= period:
+            raise ValueError(
+                f"{property_} layer offset ({offset}) must be smaller than {property_} layer period ({period})"
+            )

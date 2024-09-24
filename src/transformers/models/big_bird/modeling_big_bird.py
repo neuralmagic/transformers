@@ -26,6 +26,7 @@ from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from ...activations import ACT2FN
+from ...generation import GenerationMixin
 from ...modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPoolingAndCrossAttentions,
@@ -2290,7 +2291,7 @@ class BigBirdForPreTraining(BigBirdPreTrainedModel):
 
             - 0 indicates sequence B is a continuation of sequence A,
             - 1 indicates sequence B is a random sequence.
-        kwargs (`Dict[str, any]`, optional, defaults to *{}*):
+        kwargs (`Dict[str, any]`, *optional*, defaults to `{}`):
             Used to hide legacy arguments that have been deprecated.
 
         Returns:
@@ -2409,7 +2410,7 @@ class BigBirdForMaskedLM(BigBirdPreTrainedModel):
 
         >>> tokenizer = AutoTokenizer.from_pretrained("google/bigbird-roberta-base")
         >>> model = BigBirdForMaskedLM.from_pretrained("google/bigbird-roberta-base")
-        >>> squad_ds = load_dataset("squad_v2", split="train")  # doctest: +IGNORE_RESULT
+        >>> squad_ds = load_dataset("rajpurkar/squad_v2", split="train")  # doctest: +IGNORE_RESULT
 
         >>> # select random long article
         >>> LONG_ARTICLE_TARGET = squad_ds[81514]["context"]
@@ -2495,7 +2496,7 @@ class BigBirdForMaskedLM(BigBirdPreTrainedModel):
 @add_start_docstrings(
     """BigBird Model with a `language modeling` head on top for CLM fine-tuning.""", BIG_BIRD_START_DOCSTRING
 )
-class BigBirdForCausalLM(BigBirdPreTrainedModel):
+class BigBirdForCausalLM(BigBirdPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["cls.predictions.decoder.weight", "cls.predictions.decoder.bias"]
 
     def __init__(self, config):
@@ -2711,7 +2712,7 @@ class BigBirdForSequenceClassification(BigBirdPreTrainedModel):
 
         >>> tokenizer = AutoTokenizer.from_pretrained("l-yohai/bigbird-roberta-base-mnli")
         >>> model = BigBirdForSequenceClassification.from_pretrained("l-yohai/bigbird-roberta-base-mnli")
-        >>> squad_ds = load_dataset("squad_v2", split="train")  # doctest: +IGNORE_RESULT
+        >>> squad_ds = load_dataset("rajpurkar/squad_v2", split="train")  # doctest: +IGNORE_RESULT
 
         >>> LONG_ARTICLE = squad_ds[81514]["context"]
         >>> inputs = tokenizer(LONG_ARTICLE, return_tensors="pt")
@@ -3040,7 +3041,7 @@ class BigBirdForQuestionAnswering(BigBirdPreTrainedModel):
 
         >>> tokenizer = AutoTokenizer.from_pretrained("google/bigbird-roberta-base")
         >>> model = BigBirdForQuestionAnswering.from_pretrained("google/bigbird-roberta-base")
-        >>> squad_ds = load_dataset("squad_v2", split="train")  # doctest: +IGNORE_RESULT
+        >>> squad_ds = load_dataset("rajpurkar/squad_v2", split="train")  # doctest: +IGNORE_RESULT
 
         >>> # select random article and question
         >>> LONG_ARTICLE = squad_ds[81514]["context"]

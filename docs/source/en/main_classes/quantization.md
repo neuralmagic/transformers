@@ -56,3 +56,15 @@ Learn how to quantize models in the [Quantization](../quantization) guide.
 ## HqqConfig
 
 [[autodoc]] HqqConfig
+
+## FbgemmFp8Config
+
+[[autodoc]] FbgemmFp8Config
+
+## CompressedTensorsConfig
+
+[[autodoc]] CompressedTensorsConfig
+
+## TorchAoConfig
+
+[[autodoc]] TorchAoConfig

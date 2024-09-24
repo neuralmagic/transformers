@@ -24,6 +24,7 @@ import torch.nn as nn
 from torch.nn import CrossEntropyLoss
 
 from ...activations import ACT2FN
+from ...generation import GenerationMixin
 from ...modeling_outputs import (
     MoEModelOutput,
     MoEModelOutputWithPastAndCrossAttentions,
@@ -294,9 +295,17 @@ class SwitchTransformersSparseMLP(nn.Module):
         # can be unchanged from one layer to another. That is why the hidden states are cloned before updating only the seleced ones.
 
         next_states = hidden_states.clone()
-        for idx, expert in enumerate(self.experts.values()):
-            token_indices = router_mask[:, :, idx].bool()
-            next_states[token_indices] = expert(hidden_states[token_indices]).to(next_states.dtype)
+
+        router_mask = router_mask.bool()
+        batch_size, seq_len, num_experts = router_mask.shape
+        idx_mask = router_mask.transpose(1, 2).reshape(batch_size * seq_len, num_experts).sum(dim=0)
+        idx_mask = torch.nonzero(idx_mask, as_tuple=True)[
+            0
+        ].tolist()  # length: number of "activated" expert / value: index
+        for idx in idx_mask:
+            next_states[router_mask[:, :, idx]] = getattr(self.experts, "expert_{}".format(idx))(
+                hidden_states[router_mask[:, :, idx]]
+            )
 
         hidden_states = router_probs * next_states
         return hidden_states, (router_logits, expert_index)
@@ -1448,7 +1457,7 @@ class SwitchTransformersModel(SwitchTransformersPreTrainedModel):
 @add_start_docstrings(
     """SWITCH_TRANSFORMERS Model with a `language modeling` head on top.""", SWITCH_TRANSFORMERS_START_DOCSTRING
 )
-class SwitchTransformersForConditionalGeneration(SwitchTransformersPreTrainedModel):
+class SwitchTransformersForConditionalGeneration(SwitchTransformersPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["encoder.embed_tokens.weight", "decoder.embed_tokens.weight", "lm_head.weight"]
 
     def __init__(self, config: SwitchTransformersConfig):
